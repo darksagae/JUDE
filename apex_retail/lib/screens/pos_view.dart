@@ -9,10 +9,13 @@ class PosView extends StatefulWidget {
 }
 
 class _CartLine {
-  final Product product;
+  // Not final: re-pointed to the live Product instance on every build (see
+  // _PosViewState.build) so a price/stock edit made in Inventory while this
+  // item is already sitting in an active cart shows up immediately, instead
+  // of only after the line is removed and re-added.
+  Product product;
   int quantity;
   num unitPrice;
-  String pricingTier = 'retail'; // 'retail' | 'wholesale'
   late final TextEditingController qtyCtrl;
   late final TextEditingController priceCtrl;
 
@@ -21,12 +24,10 @@ class _CartLine {
     priceCtrl = TextEditingController(text: _priceText(unitPrice));
   }
 
-  /// The per-unit floor for the currently selected pricing tier.
-  num get tierFloor => pricingTier == 'wholesale'
-      ? (product.unitsPerPackage > 0
-          ? product.wholesalePrice / product.unitsPerPackage
-          : product.wholesalePrice)
-      : product.retailPrice;
+  /// The per-unit minimum a checkout price may not go below.
+  /// Expired stock is exempt — it may be sold at any price, even a loss,
+  /// since moving it out is better than a total write-off.
+  num get floor => isProductExpired(product) ? 0 : product.wholesalePrice;
 
   static String _priceText(num v) =>
       v == v.roundToDouble() ? '${v.toInt()}' : '$v';
@@ -86,6 +87,17 @@ class _PosViewState extends State<PosView> {
     _cart.clear();
   }
 
+  // Commits whatever price the staff has typed (even if not yet confirmed
+  // via Enter/blur) into line.unitPrice, so a subsequent syncFields() call
+  // — triggered by a qty change — doesn't clobber it back to the old price.
+  void _commitLivePrice(_CartLine line) {
+    final parsed = num.tryParse(line.priceCtrl.text.trim());
+    if (parsed == null || parsed == line.unitPrice) return;
+    final floor = line.floor;
+    if (floor > 0 && parsed < floor) return;
+    line.unitPrice = parsed;
+  }
+
   void _applyQty(_CartLine line) {
     final parsed = int.tryParse(line.qtyCtrl.text.trim());
     if (parsed == null || parsed <= 0) {
@@ -94,6 +106,7 @@ class _PosViewState extends State<PosView> {
     }
     final max = line.product.currentStock.toInt();
     setState(() {
+      _commitLivePrice(line);
       line.quantity = parsed > max ? max : parsed;
       line.syncFields();
     });
@@ -105,7 +118,7 @@ class _PosViewState extends State<PosView> {
       line.syncFields();
       return;
     }
-    final floor = line.tierFloor;
+    final floor = line.floor;
     if (floor > 0 && parsed < floor) {
       _toast('Price cannot be below floor of ${shs(floor)}',
           color: AppColors.amber600);
@@ -122,7 +135,7 @@ class _PosViewState extends State<PosView> {
     setState(() {
       for (final line in List<_CartLine>.from(_cart)) {
         final price = num.tryParse(line.priceCtrl.text.trim());
-        if (price != null && (line.tierFloor <= 0 || price >= line.tierFloor)) {
+        if (price != null && (line.floor <= 0 || price >= line.floor)) {
           line.unitPrice = price;
         } else {
           line.syncFields();
@@ -177,6 +190,7 @@ class _PosViewState extends State<PosView> {
           _cart.where((c) => c.product.id == p.id).cast<_CartLine?>().firstOrNull;
       if (existing != null) {
         if (existing.quantity < p.currentStock) {
+          _commitLivePrice(existing);
           existing.quantity++;
           existing.syncFields();
         }
@@ -308,7 +322,6 @@ class _PosViewState extends State<PosView> {
               totalBuyingPrice: c.product.buyingPrice * c.quantity,
               totalSellingPrice: c.unitPrice * c.quantity,
               profit: (c.unitPrice - c.product.buyingPrice) * c.quantity,
-              pricingTier: c.pricingTier,
             ))
         .toList();
 
@@ -361,6 +374,14 @@ class _PosViewState extends State<PosView> {
   Widget build(BuildContext context) {
     final app = context.watch<AppState>();
     final products = app.products;
+    // Re-point every cart line at the live Product instance so an Inventory
+    // price/stock edit shows up immediately, even for items already in the
+    // active cart — not just newly-added ones.
+    final byId = {for (final p in products) p.id: p};
+    for (final line in _cart) {
+      final live = byId[line.product.id];
+      if (live != null) line.product = live;
+    }
     final cats = <String>['All', ...{for (final p in products) p.category}];
     final query = _search.text.toLowerCase();
     final filtered = products.where((p) {
@@ -413,6 +434,8 @@ class _PosViewState extends State<PosView> {
       List<Product> lowStock, List<Product> expired, List<Product> nearExpiry,
       List<Product> products, AppState app) {
     final warnings = lowStock.length + expired.length + nearExpiry.length;
+    final outOfStock = lowStock.where((p) => p.currentStock <= 0).toList();
+    final justLow = lowStock.where((p) => p.currentStock > 0).toList();
     return _card(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -452,12 +475,15 @@ class _PosViewState extends State<PosView> {
                         for (final p in expired)
                           _alertRow('❌ [EXPIRED] ${p.name}',
                               'Exp: ${p.expirationDate}', const Color(0xFF9F1239)),
+                        for (final p in outOfStock)
+                          _alertRow('🚫 [OUT OF STOCK] ${p.name}', '0 left',
+                              AppColors.red),
                         for (final p in nearExpiry)
                           _alertRow('⚠️ [NEAR EXPIRY] ${p.name}',
-                              'Exp: ${p.expirationDate}', AppColors.amber600),
-                        for (final p in lowStock)
+                              'Exp: ${p.expirationDate}', AppColors.red),
+                        for (final p in justLow)
                           _alertRow('📉 [REPLENISH] ${p.name}',
-                              '${p.currentStock} left', AppColors.slate600),
+                              '${p.currentStock} left', AppColors.amber600),
                       ]),
                     ),
                   ),
@@ -592,20 +618,22 @@ class _PosViewState extends State<PosView> {
       child: Container(
         padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
-          color: expired
+          color: (expired || out)
               ? const Color(0xFFFFF1F2)
-              : fav
-                  ? const Color(0xFFFFFBEB)
-                  : out
-                      ? AppColors.slate50
+              : nearExpiry
+                  ? const Color(0xFFFEF2F2)
+                  : fav
+                      ? const Color(0xFFFFFBEB)
                       : Colors.white,
           border: Border.all(
               color: fav
                   ? AppColors.amber.withValues(alpha: 0.5)
-                  : expired
+                  : (expired || out)
                       ? const Color(0xFFFECDD3)
-                      : AppColors.slate200,
-              width: fav ? 1.5 : 1),
+                      : nearExpiry
+                          ? AppColors.red.withValues(alpha: 0.35)
+                          : AppColors.slate200,
+              width: fav ? 1.5 : (expired || out || nearExpiry) ? 1.5 : 1),
           borderRadius: BorderRadius.circular(12),
         ),
         child: Column(
@@ -633,9 +661,12 @@ class _PosViewState extends State<PosView> {
               if (expired) ...[
                 const SizedBox(width: 4),
                 _tag('Expired', AppColors.red, Colors.white)
+              ] else if (out) ...[
+                const SizedBox(width: 4),
+                _tag('Out of Stock', AppColors.red, Colors.white),
               ] else if (nearExpiry) ...[
                 const SizedBox(width: 4),
-                _tag('Expiring', const Color(0xFFFEF3C7), AppColors.amber600),
+                _tag('Expiring', AppColors.red, Colors.white),
               ],
             ]),
             const SizedBox(height: 6),
@@ -823,6 +854,7 @@ class _PosViewState extends State<PosView> {
               if (line.quantity <= 1) {
                 _removeCartLine(line);
               } else {
+                _commitLivePrice(line);
                 line.quantity--;
                 line.syncFields();
               }
@@ -854,6 +886,7 @@ class _PosViewState extends State<PosView> {
           _qtyBtn(Icons.add, () {
             if (line.quantity < line.product.currentStock) {
               setState(() {
+                _commitLivePrice(line);
                 line.quantity++;
                 line.syncFields();
               });
@@ -861,14 +894,12 @@ class _PosViewState extends State<PosView> {
           }),
         ],
       );
-      final customPrice = _liveUnitPrice(line) > line.tierFloor;
-      final tierToggle = Row(mainAxisSize: MainAxisSize.min, children: [
-        _tierChip(line, 'retail', 'Retail'),
-        const SizedBox(width: 4),
-        _tierChip(line, 'wholesale', 'Wholesale'),
-      ]);
+      final customPrice = _liveUnitPrice(line) != line.product.retailPrice;
       final floorLabel = Row(mainAxisSize: MainAxisSize.min, children: [
-        Text('Floor: ${shs(line.tierFloor)}/${line.product.unitLabel}',
+        Text(
+            isProductExpired(line.product)
+                ? 'No limit (expired stock)'
+                : 'Limit: ${shs(line.floor)}/${line.product.unitLabel}',
             style: const TextStyle(fontSize: 9, color: AppColors.slate400)),
         if (customPrice) ...[
           const SizedBox(width: 4),
@@ -895,8 +926,6 @@ class _PosViewState extends State<PosView> {
                         style: const TextStyle(
                             fontSize: 12, fontWeight: FontWeight.w500)),
                     floorLabel,
-                    const SizedBox(height: 4),
-                    tierToggle,
                   ],
                 ),
               ),
@@ -925,8 +954,6 @@ class _PosViewState extends State<PosView> {
                   style: const TextStyle(
                       fontSize: 12, fontWeight: FontWeight.w500)),
               floorLabel,
-              const SizedBox(height: 4),
-              tierToggle,
             ],
           ),
         ),
@@ -938,34 +965,6 @@ class _PosViewState extends State<PosView> {
         ),
       ]);
     }));
-  }
-
-  Widget _tierChip(_CartLine line, String tier, String label) {
-    final active = line.pricingTier == tier;
-    return InkWell(
-      onTap: active
-          ? null
-          : () => setState(() {
-                line.pricingTier = tier;
-                line.unitPrice = line.tierFloor;
-                line.syncFields();
-              }),
-      borderRadius: BorderRadius.circular(6),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-        decoration: BoxDecoration(
-          color: active ? AppColors.indigo : AppColors.slate50,
-          borderRadius: BorderRadius.circular(6),
-          border: Border.all(
-              color: active ? AppColors.indigo : AppColors.slate200),
-        ),
-        child: Text(label,
-            style: TextStyle(
-                fontSize: 9,
-                fontWeight: FontWeight.bold,
-                color: active ? Colors.white : AppColors.slate600)),
-      ),
-    );
   }
 
   Widget _qtyBtn(IconData icon, VoidCallback onTap) => InkWell(

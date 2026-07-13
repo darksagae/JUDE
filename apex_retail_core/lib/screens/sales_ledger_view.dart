@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import 'package:apex_retail_core/data/app_state.dart';
 import 'package:apex_retail_core/models/models.dart';
 import 'package:apex_retail_core/theme.dart';
+import 'package:apex_retail_core/utils/csv_export.dart';
 import 'package:apex_retail_core/utils/format.dart';
 import 'package:apex_retail_core/utils/responsive.dart';
 import 'package:apex_retail_core/widgets/receipt_dialog.dart';
@@ -18,6 +19,7 @@ class _SalesLedgerViewState extends State<SalesLedgerView> {
   final _search = TextEditingController();
   Sale? _selected;
   bool _refreshing = false;
+  bool _exportingCsv = false;
   String? _deletingId;
   String _period = 'today';
   DateTime? _customDate;
@@ -50,6 +52,21 @@ class _SalesLedgerViewState extends State<SalesLedgerView> {
       _msg('Cloud pull deferred. Offline ledger fallback loaded.', err: true);
     } finally {
       if (mounted) setState(() => _refreshing = false);
+    }
+  }
+
+  Future<void> _exportCsv(List<Sale> sales) async {
+    if (sales.isEmpty) {
+      _msg('No transactions in the current view to export.', err: true);
+      return;
+    }
+    setState(() => _exportingCsv = true);
+    try {
+      await exportSalesCsv(sales);
+    } catch (_) {
+      _msg('Could not export CSV on this device.', err: true);
+    } finally {
+      if (mounted) setState(() => _exportingCsv = false);
     }
   }
 
@@ -121,16 +138,29 @@ class _SalesLedgerViewState extends State<SalesLedgerView> {
       children: [
         ResponsiveHeader(
           title: 'TRANSACTION & SALES LEDGER',
-          action: OutlinedButton.icon(
-            onPressed: _refreshing ? null : _refresh,
-            icon: _refreshing
-                ? const SizedBox(
-                    width: 14,
-                    height: 14,
-                    child: CircularProgressIndicator(strokeWidth: 2))
-                : const Icon(Icons.refresh, size: 14),
-            label: const Text('Pull Cloud Updates'),
-          ),
+          action: Wrap(spacing: 8, runSpacing: 8, children: [
+            if (app.session.role.isManagerial)
+              OutlinedButton.icon(
+                onPressed: _exportingCsv ? null : () => _exportCsv(sales),
+                icon: _exportingCsv
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Icon(Icons.file_download_outlined, size: 14),
+                label: const Text('Export CSV'),
+              ),
+            OutlinedButton.icon(
+              onPressed: _refreshing ? null : _refresh,
+              icon: _refreshing
+                  ? const SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Icon(Icons.refresh, size: 14),
+              label: const Text('Pull Cloud Updates'),
+            ),
+          ]),
         ),
         const SizedBox(height: 16),
         _buildPeriodFilters(),
@@ -545,8 +575,7 @@ class _SalesLedgerViewState extends State<SalesLedgerView> {
                           children: [
                             Expanded(
                                 child: Text(
-                                    '${it.productName} x${it.quantity}'
-                                    '${it.isWholesale ? ' (Wholesale)' : ''}',
+                                    '${it.productName} x${it.quantity}',
                                     style: const TextStyle(fontSize: 12))),
                             Text(shs(it.sellingPrice * it.quantity),
                                 style: const TextStyle(fontSize: 12)),

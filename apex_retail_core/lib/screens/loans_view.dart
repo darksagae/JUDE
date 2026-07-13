@@ -9,7 +9,10 @@ import 'package:apex_retail_core/utils/format.dart';
 import 'package:apex_retail_core/utils/responsive.dart';
 
 class LoansView extends StatefulWidget {
-  const LoansView({super.key});
+  // Loans are only ever registered from the POS checkout flow — the Admin
+  // console is read-only for creation (it can still record payments).
+  final bool canRegister;
+  const LoansView({super.key, this.canRegister = true});
   @override
   State<LoansView> createState() => _LoansViewState();
 }
@@ -17,11 +20,37 @@ class LoansView extends StatefulWidget {
 class _LoansViewState extends State<LoansView> {
   final _search = TextEditingController();
   String _filter = 'active'; // active | overdue | settled | all
+  bool _refreshing = false;
 
   @override
   void dispose() {
     _search.dispose();
     super.dispose();
+  }
+
+  void _msg(String text, {bool err = false}) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(text),
+      backgroundColor: err ? AppColors.rose : AppColors.emerald,
+      behavior: SnackBarBehavior.floating,
+    ));
+  }
+
+  Future<void> _refresh() async {
+    final app = context.read<AppState>();
+    setState(() => _refreshing = true);
+    try {
+      if (app.offlineMode) {
+        _msg('Offline Mode: Reading offline loan records only.', err: true);
+      } else {
+        await app.triggerSync();
+        _msg('Loan ledger synced with the cloud.');
+      }
+    } catch (_) {
+      _msg('Cloud pull deferred. Offline loan data shown.', err: true);
+    } finally {
+      if (mounted) setState(() => _refreshing = false);
+    }
   }
 
   @override
@@ -46,12 +75,26 @@ class _LoansViewState extends State<LoansView> {
       children: [
         ResponsiveHeader(
           title: 'LOANS & CREDIT LEDGER',
-          action: FilledButton.icon(
-            style: FilledButton.styleFrom(backgroundColor: AppColors.indigo),
-            onPressed: () => _openLoanForm(app),
-            icon: const Icon(Icons.add, size: 16),
-            label: const Text('Register Loan'),
-          ),
+          action: Wrap(spacing: 8, runSpacing: 8, children: [
+            OutlinedButton.icon(
+              onPressed: _refreshing ? null : _refresh,
+              icon: _refreshing
+                  ? const SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Icon(Icons.refresh, size: 14),
+              label: const Text('Pull Cloud Updates'),
+            ),
+            if (widget.canRegister)
+              FilledButton.icon(
+                style:
+                    FilledButton.styleFrom(backgroundColor: AppColors.indigo),
+                onPressed: () => _openLoanForm(app),
+                icon: const Icon(Icons.add, size: 16),
+                label: const Text('Register Loan'),
+              ),
+          ]),
         ),
         const SizedBox(height: 16),
         _summaryRow(app),
@@ -294,6 +337,15 @@ class _LoansViewState extends State<LoansView> {
                   minimumSize: const Size(0, 34),
                   foregroundColor: AppColors.emerald),
             ),
+          if (widget.canRegister)
+            OutlinedButton.icon(
+              onPressed: () => _addToLoan(app, l),
+              icon: const Icon(Icons.add_circle_outline, size: 14),
+              label: const Text('Add to Loan'),
+              style: OutlinedButton.styleFrom(
+                  minimumSize: const Size(0, 34),
+                  foregroundColor: AppColors.amber600),
+            ),
           if (app.session.role == UserRole.topManager)
             IconButton(
               tooltip: 'Delete',
@@ -389,6 +441,45 @@ class _LoansViewState extends State<LoansView> {
               Navigator.pop(ctx);
             },
             child: const Text('Record Payment'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _addToLoan(AppState app, Loan l) {
+    final amount = TextEditingController();
+    final notes = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Add to Loan — ${l.customerName}',
+            style: const TextStyle(fontSize: 16)),
+        content: ConstrainedBox(
+          constraints: BoxConstraints(
+              maxWidth: Responsive.dialogWidth(ctx, max: 320)),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Text('Current balance: ${shs(l.balance)}',
+                style: const TextStyle(fontSize: 12, color: AppColors.slate500)),
+            const SizedBox(height: 8),
+            _f('Additional amount (shs) *', amount, num: true),
+            _f('Notes', notes),
+          ]),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: AppColors.amber600),
+            onPressed: () {
+              final amt = num.tryParse(amount.text);
+              if (amt == null || amt <= 0) return;
+              app.increaseLoan(l.id, amt,
+                  notes: notes.text.trim().isEmpty ? null : notes.text.trim());
+              Navigator.pop(ctx);
+            },
+            child: const Text('Add to Loan'),
           ),
         ],
       ),

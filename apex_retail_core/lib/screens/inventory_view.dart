@@ -184,8 +184,8 @@ class _InventoryViewState extends State<InventoryView> {
                 DataColumn(label: Text('SKU / Name')),
                 DataColumn(label: Text('Category')),
                 DataColumn(label: Text('Buying'), numeric: true),
-                DataColumn(label: Text('Wholesale'), numeric: true),
-                DataColumn(label: Text('Retail'), numeric: true),
+                DataColumn(label: Text('Limit Price'), numeric: true),
+                DataColumn(label: Text('Selling Price'), numeric: true),
                 DataColumn(label: Text('Stock')),
                 DataColumn(label: Text('Expiry')),
                 DataColumn(label: Text('Actions')),
@@ -215,44 +215,17 @@ class _InventoryViewState extends State<InventoryView> {
         children: [
           Text(p.sku,
               style: const TextStyle(fontSize: 9, color: AppColors.slate400)),
-          Row(mainAxisSize: MainAxisSize.min, children: [
-            Flexible(
-              child: Text(p.name,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                      fontSize: 12, fontWeight: FontWeight.w600)),
-            ),
-            if (p.isWholesale) ...[
-              const SizedBox(width: 6),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-                decoration: BoxDecoration(
-                    color: const Color(0xFFEEF2FF),
-                    borderRadius: BorderRadius.circular(4)),
-                child: const Text('WHOLESALE',
-                    style: TextStyle(
-                        fontSize: 8,
-                        fontWeight: FontWeight.bold,
-                        color: AppColors.indigo)),
-              ),
-            ],
-          ]),
+          Text(p.name,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                  fontSize: 12, fontWeight: FontWeight.w600)),
         ],
       )),
       DataCell(Text(p.category, style: const TextStyle(fontSize: 11))),
       DataCell(Text(shs(p.buyingPrice),
           style: const TextStyle(color: AppColors.slate500))),
-      DataCell(Column(
-        crossAxisAlignment: CrossAxisAlignment.end,
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Text(shs(p.wholesalePrice),
-              style: const TextStyle(fontWeight: FontWeight.w600)),
-          if (p.isPackaged)
-            Text('/${p.packageLabel} of ${p.unitsPerPackage.toInt()}',
-                style: const TextStyle(fontSize: 9, color: AppColors.slate400)),
-        ],
-      )),
+      DataCell(Text(shs(p.wholesalePrice),
+          style: const TextStyle(fontWeight: FontWeight.w600))),
       DataCell(Text('${shs(p.retailPrice)}/${p.unitLabel}',
           style: const TextStyle(fontWeight: FontWeight.w600))),
       DataCell(Column(
@@ -417,36 +390,13 @@ class _InventoryViewState extends State<InventoryView> {
         text: editing?.wholesalePrice.toString() ?? '');
     final retail = TextEditingController(
         text: editing?.retailPrice.toString() ?? '');
-    var retailEdited = editing != null; // don't clobber an existing product's retail price
     final unitLabel =
         TextEditingController(text: editing?.unitLabel ?? 'piece');
-    var isPackaged = editing?.isPackaged ?? false;
-    final packageLabel =
-        TextEditingController(text: editing?.packageLabel ?? '');
-    final unitsPerPackage = TextEditingController(
-        text: (editing?.unitsPerPackage ?? 1) == 1
-            ? ''
-            : editing!.unitsPerPackage.toString());
     final stock =
         TextEditingController(text: editing?.currentStock.toString() ?? '');
     final minStock =
         TextEditingController(text: editing?.minStockLevel.toString() ?? '5');
     final expiry = TextEditingController(text: editing?.expirationDate ?? '');
-    var saleType = editing?.saleType ?? 'retail';
-
-    void recalcRetail(void Function(void Function()) setModal) {
-      // Always rebuild (unit-dependent labels need to refresh even when the
-      // retail price itself isn't being auto-recomputed anymore).
-      setModal(() {
-        if (retailEdited) return;
-        final w = num.tryParse(wholesale.text.trim());
-        final u = num.tryParse(unitsPerPackage.text.trim()) ?? 1;
-        if (w == null) return;
-        final r = isPackaged && u > 0 ? w / u : w;
-        retail.text =
-            r == r.roundToDouble() ? r.toInt().toString() : r.toString();
-      });
-    }
 
     showDialog(
       context: context,
@@ -535,34 +485,7 @@ class _InventoryViewState extends State<InventoryView> {
                   ),
                   _field('Buying cost (shs) *', buying, num: true),
                   const SizedBox(height: 4),
-                  // How this commodity is bought/stocked: loose base units
-                  // (piece/kg/litre) or bulk packages (box/sack/carton).
-                  Row(children: [
-                    const Text('Bought as:',
-                        style: TextStyle(
-                            fontSize: 12, fontWeight: FontWeight.w600)),
-                    const SizedBox(width: 10),
-                    _typeChip('Loose units', !isPackaged, () {
-                      isPackaged = false;
-                      recalcRetail(setModal);
-                    }),
-                    const SizedBox(width: 6),
-                    _typeChip('Bulk packages', isPackaged, () {
-                      isPackaged = true;
-                      recalcRetail(setModal);
-                    }),
-                  ]),
-                  const SizedBox(height: 8),
-                  Row(children: [
-                    Expanded(
-                        child: _field('Base unit *', unitLabel,
-                            onChanged: () => recalcRetail(setModal))),
-                    if (isPackaged) ...[
-                      const SizedBox(width: 8),
-                      Expanded(
-                          child: _field('Package name *', packageLabel)),
-                    ],
-                  ]),
+                  _field('Base unit *', unitLabel, onChanged: () => setModal(() {})),
                   const Padding(
                     padding: EdgeInsets.only(bottom: 4),
                     child: Align(
@@ -573,36 +496,23 @@ class _InventoryViewState extends State<InventoryView> {
                               fontSize: 10, color: AppColors.slate400)),
                     ),
                   ),
-                  if (isPackaged) ...[
-                    _field(
-                        'Base units per package * (e.g. 12 pieces/box, 50 kg/sack)',
-                        unitsPerPackage,
-                        num: true, onChanged: () => recalcRetail(setModal)),
-                    const SizedBox(height: 4),
-                  ],
                   Row(children: [
                     Expanded(
-                        child: _field(
-                            isPackaged
-                                ? 'Wholesale price / package *'
-                                : 'Wholesale price *',
-                            wholesale,
-                            num: true,
-                            onChanged: () => recalcRetail(setModal))),
+                        child: _field('Limit price (shs) *', wholesale,
+                            num: true)),
                     const SizedBox(width: 8),
                     Expanded(
                         child: _field(
-                            'Retail price / ${unitLabel.text.trim().isEmpty ? 'unit' : unitLabel.text.trim()} *',
+                            'Selling price / ${unitLabel.text.trim().isEmpty ? 'unit' : unitLabel.text.trim()} *',
                             retail,
-                            num: true,
-                            onChanged: () => retailEdited = true)),
+                            num: true)),
                   ]),
                   const Padding(
                     padding: EdgeInsets.only(top: 2, bottom: 6),
                     child: Align(
                       alignment: Alignment.centerLeft,
                       child: Text(
-                          'Retail price auto-fills from wholesale ÷ units-per-package — edit it to override. Retail is the POS checkout floor.',
+                          'Limit price is the minimum a worker may sell at (POS checkout floor). Selling price is the default shown at POS.',
                           style: TextStyle(
                               fontSize: 10, color: AppColors.slate400)),
                     ),
@@ -615,19 +525,6 @@ class _InventoryViewState extends State<InventoryView> {
                     const SizedBox(width: 8),
                     Expanded(
                         child: _field('Low threshold *', minStock, num: true)),
-                  ]),
-                  const SizedBox(height: 8),
-                  // Retail vs Wholesale sale type. Stock is one pooled quantity.
-                  Row(children: [
-                    const Text('Sale type:',
-                        style: TextStyle(
-                            fontSize: 12, fontWeight: FontWeight.w600)),
-                    const SizedBox(width: 10),
-                    _typeChip('Retail', saleType == 'retail',
-                        () => setModal(() => saleType = 'retail')),
-                    const SizedBox(width: 6),
-                    _typeChip('Wholesale', saleType == 'wholesale',
-                        () => setModal(() => saleType = 'wholesale')),
                   ]),
                   const SizedBox(height: 8),
                   _dateField('Expiration Date', expiry, ctx, setModal),
@@ -646,17 +543,10 @@ class _InventoryViewState extends State<InventoryView> {
                 final buyingVal = num.tryParse(buying.text) ?? 0;
                 final wholesaleVal =
                     num.tryParse(wholesale.text.trim()) ?? buyingVal;
-                final unitsVal = isPackaged
-                    ? (num.tryParse(unitsPerPackage.text.trim()) ?? 1)
-                    : 1;
-                final retailVal = num.tryParse(retail.text.trim()) ??
-                    (unitsVal > 0 ? wholesaleVal / unitsVal : wholesaleVal);
+                final retailVal =
+                    num.tryParse(retail.text.trim()) ?? wholesaleVal;
                 final unit =
                     unitLabel.text.trim().isEmpty ? 'piece' : unitLabel.text.trim();
-                final pkgLabel =
-                    isPackaged && packageLabel.text.trim().isNotEmpty
-                        ? packageLabel.text.trim()
-                        : null;
                 final custom = customCategory.text.trim();
                 if (custom.isNotEmpty) {
                   category = app.ensureCategory(custom);
@@ -672,11 +562,8 @@ class _InventoryViewState extends State<InventoryView> {
                     ..wholesalePrice = wholesaleVal
                     ..retailPrice = retailVal
                     ..unitLabel = unit
-                    ..packageLabel = pkgLabel
-                    ..unitsPerPackage = unitsVal
                     ..currentStock = num.tryParse(stock.text) ?? 0
                     ..minStockLevel = num.tryParse(minStock.text) ?? 0
-                    ..saleType = saleType
                     ..expirationDate = exp;
                   if (upd.sellingPrice < retailVal) upd.sellingPrice = retailVal;
                   app.updateProduct(upd);
@@ -689,11 +576,8 @@ class _InventoryViewState extends State<InventoryView> {
                     wholesalePrice: wholesaleVal,
                     retailPrice: retailVal,
                     unitLabel: unit,
-                    packageLabel: pkgLabel,
-                    unitsPerPackage: unitsVal,
                     currentStock: num.tryParse(stock.text) ?? 0,
                     minStockLevel: num.tryParse(minStock.text) ?? 0,
-                    saleType: saleType,
                     expirationDate: exp,
                   );
                 }
@@ -788,17 +672,12 @@ class _InventoryViewState extends State<InventoryView> {
               maxWidth: Responsive.dialogWidth(ctx, max: 320)),
           child: Column(mainAxisSize: MainAxisSize.min, children: [
             _field('Buying cost (shs) *', buying, num: true),
-            _field(
-                p.isPackaged
-                    ? 'Wholesale price / ${p.packageLabel} (shs) *'
-                    : 'Wholesale price (shs) *',
-                wholesale,
-                num: true),
-            _field('Retail price / ${p.unitLabel} (shs) *', retail, num: true),
+            _field('Limit price (shs) *', wholesale, num: true),
+            _field('Selling price / ${p.unitLabel} (shs) *', retail, num: true),
             const Align(
               alignment: Alignment.centerLeft,
               child: Text(
-                  'Retail price is the POS checkout floor — actual selling price can be raised at checkout but not below it.',
+                  'Limit price is the POS checkout floor — actual selling price can be raised at checkout but not below it.',
                   style: TextStyle(fontSize: 10, color: AppColors.slate400)),
             ),
           ]),
@@ -1073,24 +952,6 @@ class _InventoryViewState extends State<InventoryView> {
       ),
     );
   }
-
-  Widget _typeChip(String label, bool active, VoidCallback onTap) => InkWell(
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-          decoration: BoxDecoration(
-            color: active ? AppColors.indigo : Colors.white,
-            border: Border.all(
-                color: active ? AppColors.indigo : AppColors.slate200),
-            borderRadius: BorderRadius.circular(20),
-          ),
-          child: Text(label,
-              style: TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w600,
-                  color: active ? Colors.white : AppColors.slate600)),
-        ),
-      );
 
   Widget _field(String label, TextEditingController c,
       {bool num = false, VoidCallback? onChanged}) {

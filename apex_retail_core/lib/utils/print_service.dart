@@ -119,8 +119,7 @@ class PrintService {
                               style: const pw.TextStyle(fontSize: 8))),
                     ]),
                     pw.Text(
-                        '@ ${money(it.sellingPrice)} / unit'
-                        '${it.isWholesale ? ' (WHOLESALE)' : ''}',
+                        '@ ${money(it.sellingPrice)} / unit',
                         style: const pw.TextStyle(
                             fontSize: 6, color: PdfColors.grey600)),
                   ]))),

@@ -8,18 +8,6 @@ import 'package:apex_retail_core/theme.dart';
 import 'package:apex_retail_core/utils/format.dart';
 import 'package:apex_retail_core/utils/responsive.dart';
 
-const _expenseCategories = [
-  'Restock / Purchases',
-  'Rent',
-  'Utilities (Power/Water)',
-  'Salaries / Wages',
-  'Transport',
-  'Maintenance',
-  'Licenses / Taxes',
-  'Marketing',
-  'Miscellaneous',
-];
-
 class ExpensesView extends StatefulWidget {
   const ExpensesView({super.key});
   @override
@@ -60,12 +48,19 @@ class _ExpensesViewState extends State<ExpensesView> {
       children: [
         ResponsiveHeader(
           title: 'BUSINESS EXPENDITURES',
-          action: FilledButton.icon(
-            style: FilledButton.styleFrom(backgroundColor: AppColors.slate900),
-            onPressed: () => _openForm(app),
-            icon: const Icon(Icons.add, size: 16),
-            label: const Text('Record Cost'),
-          ),
+          action: Wrap(spacing: 8, runSpacing: 8, children: [
+            OutlinedButton.icon(
+              onPressed: () => _openCategoryManager(app),
+              icon: const Icon(Icons.sell_outlined, size: 14),
+              label: const Text('Manage Categories'),
+            ),
+            FilledButton.icon(
+              style: FilledButton.styleFrom(backgroundColor: AppColors.slate900),
+              onPressed: () => _openForm(app),
+              icon: const Icon(Icons.add, size: 16),
+              label: const Text('Record Cost'),
+            ),
+          ]),
         ),
         const SizedBox(height: 16),
         _card(
@@ -189,7 +184,9 @@ class _ExpensesViewState extends State<ExpensesView> {
       );
 
   void _openForm(AppState app) {
-    var category = _expenseCategories.first;
+    var category = app.expenseCategories.isNotEmpty
+        ? app.expenseCategories.first
+        : 'Miscellaneous';
     final desc = TextEditingController();
     final amount = TextEditingController();
     showDialog(
@@ -201,9 +198,10 @@ class _ExpensesViewState extends State<ExpensesView> {
               maxWidth: Responsive.dialogWidth(ctx, max: 380)),
           child: Column(mainAxisSize: MainAxisSize.min, children: [
             DropdownButtonFormField<String>(
-              initialValue: category,
+              initialValue:
+                  app.expenseCategories.contains(category) ? category : null,
               decoration: const InputDecoration(labelText: 'Category *'),
-              items: _expenseCategories
+              items: app.expenseCategories
                   .map((c) => DropdownMenuItem(value: c, child: Text(c)))
                   .toList(),
               onChanged: (v) => category = v ?? category,
@@ -236,6 +234,116 @@ class _ExpensesViewState extends State<ExpensesView> {
             },
             child: const Text('Save Cost'),
           ),
+        ],
+      ),
+    );
+  }
+
+  void _openCategoryManager(AppState app) {
+    final newCat = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(builder: (ctx, setModal) {
+        return AlertDialog(
+          title: const Text('Manage Expenditure Categories'),
+          content: ConstrainedBox(
+            constraints: BoxConstraints(
+                maxWidth: Responsive.dialogWidth(ctx, max: 380)),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              const Text(
+                'Built-in categories are listed below. Add your own custom categories anytime.',
+                style: TextStyle(fontSize: 11, color: AppColors.slate500),
+              ),
+              const SizedBox(height: 10),
+              Row(children: [
+                Expanded(
+                  child: TextField(
+                    controller: newCat,
+                    decoration: const InputDecoration(
+                      hintText: 'Custom category e.g. Fuel, Repairs',
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                FilledButton(
+                  onPressed: () {
+                    if (app.addExpenseCategory(newCat.text)) {
+                      newCat.clear();
+                      setModal(() {});
+                    }
+                  },
+                  child: const Text('Add'),
+                ),
+              ]),
+              const SizedBox(height: 12),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 260),
+                child: SingleChildScrollView(
+                  child: Column(
+                    children: app.expenseCategories
+                        .map((cat) => ListTile(
+                              dense: true,
+                              contentPadding: EdgeInsets.zero,
+                              title: Text(cat,
+                                  style: const TextStyle(fontSize: 13)),
+                              trailing: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    IconButton(
+                                      icon: const Icon(Icons.edit_outlined,
+                                          size: 16),
+                                      onPressed: () async {
+                                        final renamed =
+                                            await _promptText('Rename', cat);
+                                        if (renamed != null &&
+                                            app.editExpenseCategory(
+                                                cat, renamed)) {
+                                          setModal(() {});
+                                        }
+                                      },
+                                    ),
+                                    IconButton(
+                                      icon: const Icon(Icons.delete_outline,
+                                          size: 16, color: AppColors.red),
+                                      onPressed: () {
+                                        if (app.expenseCategories.length <= 1) {
+                                          return;
+                                        }
+                                        app.deleteExpenseCategory(cat);
+                                        setModal(() {});
+                                      },
+                                    ),
+                                  ]),
+                            ))
+                        .toList(),
+                  ),
+                ),
+              ),
+            ]),
+          ),
+          actions: [
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Close')),
+          ],
+        );
+      }),
+    );
+  }
+
+  Future<String?> _promptText(String title, String initial) {
+    final ctrl = TextEditingController(text: initial);
+    return showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: TextField(controller: ctrl, autofocus: true),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
+              child: const Text('Save')),
         ],
       ),
     );

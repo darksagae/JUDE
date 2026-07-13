@@ -50,18 +50,18 @@ class _HomeShellState extends State<HomeShell> {
     if (!silent) setState(() => _syncing = true);
     try {
       final res = await app.triggerSync();
-      if (!silent) {
+      if (!silent && mounted) {
         setState(() => _syncMsg = res.syncedCount > 0
             ? 'Sync Success! Synced ${res.syncedCount} sales & pulled master updates.'
             : 'Database synchronized with cloud. All terminals aligned.');
       }
     } catch (_) {
-      if (!silent) {
+      if (!silent && mounted) {
         setState(() => _syncMsg =
             'Sync Deferred: Server backend unreachable. Offline buffer active.');
       }
     } finally {
-      if (!silent) {
+      if (!silent && mounted) {
         setState(() => _syncing = false);
         _clearMsgLater();
       }

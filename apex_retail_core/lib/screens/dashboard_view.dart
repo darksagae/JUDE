@@ -72,7 +72,9 @@ class _DashboardViewState extends State<DashboardView> {
     }).toList();
     try {
       final report = await app.analyzeEod(todaySales, todayStr);
-      final totalSales = todaySales.fold<num>(0, (a, s) => a + s.totalAmount);
+      // Cash-basis EOD balance — loan portions aren't cash in the drawer and
+      // are reconciled separately in the Loans section.
+      final totalSales = todaySales.fold<num>(0, (a, s) => a + s.amountPaid);
       final totalProfit = todaySales.fold<num>(0, (a, s) => a + s.totalProfit);
       final totalStaked =
           todaySales.fold<num>(0, (a, s) => a + s.totalBuyingPrice);
@@ -168,12 +170,17 @@ class _DashboardViewState extends State<DashboardView> {
   Widget build(BuildContext context) {
     final app = context.watch<AppState>();
     final filtered = _filtered(app.sales);
-    final revenue = filtered.fold<num>(0, (a, s) => a + s.totalAmount);
+    // Loans are tracked and balanced independently in the Loans section —
+    // only the cash/mobile/card portion actually collected counts here.
+    final revenue = filtered.fold<num>(0, (a, s) => a + s.amountPaid);
     final staked = filtered.fold<num>(0, (a, s) => a + s.totalBuyingPrice);
     final profit = filtered.fold<num>(0, (a, s) => a + s.totalProfit);
 
-    final lowStock =
-        app.products.where((p) => p.currentStock <= p.minStockLevel).toList();
+    final outOfStock =
+        app.products.where((p) => p.currentStock <= 0).toList();
+    final lowStock = app.products
+        .where((p) => p.currentStock > 0 && p.currentStock <= p.minStockLevel)
+        .toList();
     final expiring = app.products.where((p) => isProductNearExpiry(p)).toList();
 
     return Column(
@@ -183,8 +190,8 @@ class _DashboardViewState extends State<DashboardView> {
         const SizedBox(height: 16),
         _metricsRow(revenue, staked, profit, filtered.length),
         const SizedBox(height: 16),
-        if (lowStock.isNotEmpty || expiring.isNotEmpty) ...[
-          _alertsRow(lowStock, expiring),
+        if (outOfStock.isNotEmpty || lowStock.isNotEmpty || expiring.isNotEmpty) ...[
+          _alertsRow(outOfStock, lowStock, expiring),
           const SizedBox(height: 16),
         ],
         _chartsRow(app, filtered),
@@ -260,7 +267,7 @@ class _DashboardViewState extends State<DashboardView> {
 
   Widget _metricsRow(num revenue, num staked, num profit, int count) {
     final items = [
-      _MetricData('Gross Sales Revenue', shs(revenue), Icons.trending_up,
+      _MetricData('Cash Revenue (excl. Loans)', shs(revenue), Icons.trending_up,
           const Color(0xFFEEF2FF), AppColors.indigo),
       _MetricData('Staked Capital (Cost)', shs(staked), Icons.savings_outlined,
           const Color(0xFFFFFBEB), AppColors.amber600),
@@ -318,7 +325,8 @@ class _DashboardViewState extends State<DashboardView> {
         ),
       );
 
-  Widget _alertsRow(List<Product> lowStock, List<Product> expiring) {
+  Widget _alertsRow(List<Product> outOfStock, List<Product> lowStock,
+      List<Product> expiring) {
     Widget panel(String title, List<Product> items, Color color, Color bg,
         String Function(Product) trailing) {
       if (items.isEmpty) return const SizedBox.shrink();
@@ -378,7 +386,10 @@ class _DashboardViewState extends State<DashboardView> {
     }
 
     return LayoutBuilder(builder: (context, c) {
-      final narrow = c.maxWidth < 640;
+      final narrow = c.maxWidth < 900;
+      final outPanel = panel(
+          'Out of Stock', outOfStock, AppColors.red, const Color(0xFFFEF2F2),
+          (p) => '0 left');
       final lowPanel = panel(
           'Low Inventory Alerts',
           lowStock,
@@ -391,23 +402,28 @@ class _DashboardViewState extends State<DashboardView> {
           AppColors.red,
           const Color(0xFFFEF2F2),
           (p) => 'Exp: ${p.expirationDate}');
+      final panels = [
+        if (outOfStock.isNotEmpty) outPanel,
+        if (lowStock.isNotEmpty) lowPanel,
+        if (expiring.isNotEmpty) expPanel,
+      ];
       if (narrow) {
         return Column(
           children: [
-            if (lowStock.isNotEmpty) lowPanel,
-            if (lowStock.isNotEmpty && expiring.isNotEmpty)
-              const SizedBox(height: 14),
-            if (expiring.isNotEmpty) expPanel,
+            for (var i = 0; i < panels.length; i++) ...[
+              if (i > 0) const SizedBox(height: 14),
+              panels[i],
+            ],
           ],
         );
       }
       return Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (lowStock.isNotEmpty) Expanded(child: lowPanel),
-          if (lowStock.isNotEmpty && expiring.isNotEmpty)
-            const SizedBox(width: 14),
-          if (expiring.isNotEmpty) Expanded(child: expPanel),
+          for (var i = 0; i < panels.length; i++) ...[
+            if (i > 0) const SizedBox(width: 14),
+            Expanded(child: panels[i]),
+          ],
         ],
       );
     });
@@ -443,7 +459,7 @@ class _DashboardViewState extends State<DashboardView> {
       final label =
           '${s.timestamp.split('T')[0]} ${dt.hour}:00';
       groups.putIfAbsent(label, () => [0, 0]);
-      groups[label]![0] += s.totalAmount;
+      groups[label]![0] += s.amountPaid;
       groups[label]![1] += s.totalProfit;
     }
     final entries = groups.entries.toList();

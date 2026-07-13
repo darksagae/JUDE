@@ -63,8 +63,7 @@ class _RootState extends State<_Root> {
       data: app.isManager ? managerTheme() : workerTheme(),
       child: HomeShell(
         onLock: () {
-          app.logAction(app.session.userId, app.session.name, app.session.role,
-              'LOGOUT', 'Terminal locked/secured');
+          app.logout();
           setState(() => _locked = true);
         },
       ),

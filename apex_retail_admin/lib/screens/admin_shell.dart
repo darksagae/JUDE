@@ -65,7 +65,7 @@ class _AdminShellState extends State<AdminShell> {
       case 1:
         return const SalesLedgerView();
       case 2:
-        return const LoansView();
+        return const LoansView(canRegister: false);
       case 3:
         return const ExpensesView();
       case 4:

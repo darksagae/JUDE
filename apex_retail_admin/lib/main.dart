@@ -65,6 +65,10 @@ class _AdminRootState extends State<_AdminRoot> {
                   _denied = null;
                 });
               } else {
+                // A non-Top-Manager account was authenticated by the login
+                // form itself — don't leave AppState.session pointed at it
+                // while this console stays locked.
+                app.logout();
                 setState(() => _denied =
                     'This is the Top-Admin console. Only Top Manager accounts (e.g. TM001) may sign in here.');
               }
@@ -97,8 +101,7 @@ class _AdminRootState extends State<_AdminRoot> {
       data: managerTheme(),
       child: AdminShell(
         onLock: () {
-          app.logAction(app.session.userId, app.session.name, app.session.role,
-              'LOGOUT', 'Admin console locked/secured');
+          app.logout();
           setState(() => _locked = true);
         },
       ),

@@ -213,8 +213,7 @@ class ReceiptDialog extends StatelessWidget {
                                 style: const TextStyle(fontSize: 10))),
                       ]),
                       Text(
-                          '@ ${money(it.sellingPrice)} / unit'
-                          '${it.isWholesale ? ' (WHOLESALE)' : ''}',
+                          '@ ${money(it.sellingPrice)} / unit',
                           style: const TextStyle(
                               fontSize: 8, color: AppColors.slate400)),
                     ],

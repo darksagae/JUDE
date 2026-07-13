@@ -24,6 +24,7 @@ class AppState extends ChangeNotifier {
   static const _kStaffProfiles = 'sm_staff_profiles';
   static const _kExpiredControl = 'sm_expired_control';
   static const _kCategories = 'sm_categories';
+  static const _kExpenseCategories = 'sm_expense_categories';
   static const _kPrinterSettings = 'sm_printer_settings';
   static const _kServerUrl = 'sm_server_url';
   static const _kLoans = 'sm_loans';
@@ -52,6 +53,7 @@ class AppState extends ChangeNotifier {
   List<EndOfDayReport> reports = [];
   List<StaffProfile> staff = [];
   List<String> categories = [];
+  List<String> expenseCategories = [];
   List<Loan> loans = [];
   List<Expense> expenses = [];
   late UserSession session;
@@ -85,6 +87,8 @@ class AppState extends ChangeNotifier {
     staff = _readList(_kStaffProfiles, StaffProfile.fromJson, () => defaultStaff());
     categories = _readStringList(_kCategories, () => List.of(initialCategories));
     _migrateLegacyCategories();
+    expenseCategories = _readStringList(
+        _kExpenseCategories, () => List.of(initialExpenseCategories));
     loans = _readList(_kLoans, Loan.fromJson, () => []);
     expenses = _readList(_kExpenses, Expense.fromJson, () => []);
     _purgeLegacyDemoData();
@@ -249,6 +253,8 @@ class AppState extends ChangeNotifier {
   void _persistReports() => _save(_kReports, reports);
   void _persistStaff() => _save(_kStaffProfiles, staff);
   void _persistCategories() => _prefs.setString(_kCategories, jsonEncode(categories));
+  void _persistExpenseCategories() =>
+      _prefs.setString(_kExpenseCategories, jsonEncode(expenseCategories));
   void _persistLoans() => _save(_kLoans, loans);
   void _persistExpenses() => _save(_kExpenses, expenses);
 
@@ -356,6 +362,18 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Fully signs out — clears the active session AND any impersonation
+  /// state. Locking the terminal after switching into another account must
+  /// not leave a stale [homeSession] behind for the next login to inherit.
+  void logout() {
+    logAction(session.userId, session.name, session.role, 'LOGOUT',
+        'Terminal locked/secured');
+    homeSession = null;
+    session = UserSession(userId: '', name: 'Not signed in', role: UserRole.worker);
+    _prefs.remove(_kSession);
+    notifyListeners();
+  }
+
   void setOfflineMode(bool v) {
     offlineMode = v;
     _prefs.setBool(_kOfflineMode, v);
@@ -435,6 +453,65 @@ class AppState extends ChangeNotifier {
       if (updated > 0) _persistProducts();
       _log('CATEGORY_DELETE',
           'Deleted category $category. Re-assigned $updated products to $fb.');
+      notifyListeners();
+      return true;
+    }
+    return false;
+  }
+
+  // ---- expense categories ----
+  bool addExpenseCategory(String category) {
+    final n = category.trim();
+    if (n.isNotEmpty && !expenseCategories.contains(n)) {
+      expenseCategories.add(n);
+      _persistExpenseCategories();
+      _log('EXPENSE_CATEGORY_CREATE', '${session.name} created expense category: $n');
+      notifyListeners();
+      return true;
+    }
+    return false;
+  }
+
+  bool editExpenseCategory(String oldName, String newName) {
+    final idx = expenseCategories.indexOf(oldName);
+    final n = newName.trim();
+    if (idx != -1 && n.isNotEmpty && !expenseCategories.contains(n)) {
+      expenseCategories[idx] = n;
+      var updated = 0;
+      for (final e in expenses) {
+        if (e.category == oldName) {
+          e.category = n;
+          updated++;
+        }
+      }
+      _persistExpenseCategories();
+      if (updated > 0) _persistExpenses();
+      _log('EXPENSE_CATEGORY_UPDATE',
+          'Edited expense category $oldName -> $n. Re-assigned $updated expenses.');
+      notifyListeners();
+      return true;
+    }
+    return false;
+  }
+
+  bool deleteExpenseCategory(String category, {String? fallback}) {
+    final fb = fallback ??
+        (expenseCategories.isNotEmpty ? expenseCategories.first : 'Miscellaneous');
+    final idx = expenseCategories.indexOf(category);
+    if (idx != -1) {
+      expenseCategories.removeAt(idx);
+      if (!expenseCategories.contains(fb)) expenseCategories.add(fb);
+      var updated = 0;
+      for (final e in expenses) {
+        if (e.category == category) {
+          e.category = fb;
+          updated++;
+        }
+      }
+      _persistExpenseCategories();
+      if (updated > 0) _persistExpenses();
+      _log('EXPENSE_CATEGORY_DELETE',
+          'Deleted expense category $category. Re-assigned $updated expenses to $fb.');
       notifyListeners();
       return true;
     }
@@ -943,6 +1020,24 @@ class AppState extends ChangeNotifier {
     // landing before the next scheduled push can overwrite this device's
     // local `loans` list (whole-array replace, no merge) and silently lose
     // the payment that was just recorded.
+    if (!offlineMode) {
+      triggerSync().catchError((_) => SyncResult(false, 0));
+    }
+    notifyListeners();
+  }
+
+  /// Adds extra credit to an existing loan — e.g. the customer takes more
+  /// commodities against the same running tab instead of a fresh loan.
+  void increaseLoan(String loanId, num amount, {String? notes}) {
+    final loan = loans.where((l) => l.id == loanId).cast<Loan?>().firstOrNull;
+    if (loan == null || amount <= 0) return;
+    loan.originalAmount += amount;
+    if (notes != null && notes.trim().isNotEmpty) {
+      loan.notes = [if (loan.notes != null) loan.notes!, notes.trim()].join('; ');
+    }
+    _persistLoans();
+    _log('LOAN_INCREASE',
+        'Added shs ${_fmt(amount)} more credit to loan ${loan.id} (${loan.customerName}). New balance: shs ${_fmt(loan.balance)}');
     if (!offlineMode) {
       triggerSync().catchError((_) => SyncResult(false, 0));
     }

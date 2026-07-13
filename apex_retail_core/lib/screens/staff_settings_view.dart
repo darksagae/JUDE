@@ -20,10 +20,21 @@ class _StaffSettingsViewState extends State<StaffSettingsView> {
   final _newPass = TextEditingController();
   final Map<String, bool> _visible = {};
 
+  // Kept as State fields (not created inline in _workerPasswordCard) so
+  // typing survives a parent rebuild — e.g. the periodic background sync
+  // notifying AppState — instead of being wiped by fresh controllers on
+  // every rebuild.
+  final _pwCurrent = TextEditingController();
+  final _pwNew = TextEditingController();
+  final _pwConfirm = TextEditingController();
+
   @override
   void dispose() {
     _newName.dispose();
     _newPass.dispose();
+    _pwCurrent.dispose();
+    _pwNew.dispose();
+    _pwConfirm.dispose();
     super.dispose();
   }
 
@@ -633,9 +644,9 @@ class _StaffSettingsViewState extends State<StaffSettingsView> {
   }
 
   Widget _workerPasswordCard(AppState app) {
-    final current = TextEditingController();
-    final newP = TextEditingController();
-    final confirm = TextEditingController();
+    final current = _pwCurrent;
+    final newP = _pwNew;
+    final confirm = _pwConfirm;
     return _card(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,

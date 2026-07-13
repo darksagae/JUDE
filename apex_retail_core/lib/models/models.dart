@@ -48,11 +48,11 @@ class Product {
   String category;
   num buyingPrice; // Staked cost (set)
   num sellingPrice; // Current sale price (adjustable any time, >= retailPrice)
-  num wholesalePrice; // Price for a whole package/bulk unit. No max. (was: minSellingPrice)
-  num retailPrice; // Price per individual base unit (piece/kg/litre). POS checkout floor.
-  String unitLabel; // Base unit name, e.g. 'piece', 'kg', 'litre'.
-  String? packageLabel; // Bulk package name, e.g. 'Box', 'Sack', 'Carton'. Null = sold loose, not packaged.
-  num unitsPerPackage; // Base units per package (e.g. 12 pieces/box, 50 kg/sack). 1 when not packaged.
+  num wholesalePrice; // Minimum allowed selling price (floor). Not a customer-facing price tier.
+  num retailPrice; // Default selling price per unit, shown at POS checkout.
+  String unitLabel; // Unit name, e.g. 'piece', 'kg', 'litre'.
+  String? packageLabel; // Deprecated: bulk-package feature removed. Kept for old synced records.
+  num unitsPerPackage; // Deprecated: bulk-package feature removed. Always 1 for new records.
   num currentStock; // Always in base units (unitLabel), regardless of packaging.
   num minStockLevel; // Threshold for low stock alert
   String saleType; // 'retail' | 'wholesale'

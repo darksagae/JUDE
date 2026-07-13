@@ -25,6 +25,19 @@ const List<String> initialCategories = [
   'Seedlings and Cuttings',
 ];
 
+/// Built-in expense categories. Users can add their own on top of these.
+const List<String> initialExpenseCategories = [
+  'Restock / Purchases',
+  'Rent',
+  'Utilities (Power/Water)',
+  'Salaries / Wages',
+  'Transport',
+  'Maintenance',
+  'Licenses / Taxes',
+  'Marketing',
+  'Miscellaneous',
+];
+
 /// Legacy retail categories from the original demo data — kept only so a
 /// device upgrading from the old build migrates its category list once.
 const List<String> legacyRetailCategories = [
