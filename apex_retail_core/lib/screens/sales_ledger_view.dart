@@ -30,10 +30,14 @@ class _SalesLedgerViewState extends State<SalesLedgerView> {
     super.dispose();
   }
 
-  void _msg(String text, {bool err = false}) {
+  // `neutral` is for expected offline/no-connection states — this app is
+  // designed to keep working without internet, so that isn't an error and
+  // shouldn't be flagged red like one.
+  void _msg(String text, {bool err = false, bool neutral = false}) {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
       content: Text(text),
-      backgroundColor: err ? AppColors.rose : AppColors.emerald,
+      backgroundColor:
+          err ? AppColors.rose : (neutral ? AppColors.amber600 : AppColors.emerald),
       behavior: SnackBarBehavior.floating,
     ));
   }
@@ -43,13 +47,13 @@ class _SalesLedgerViewState extends State<SalesLedgerView> {
     setState(() => _refreshing = true);
     try {
       if (app.offlineMode) {
-        _msg('Offline Mode: Reading offline sales history only.', err: true);
+        _msg('Offline Mode: showing local sales history.', neutral: true);
       } else {
         await app.triggerSync();
         _msg('Successfully pulled transaction ledger updates!');
       }
     } catch (_) {
-      _msg('Cloud pull deferred. Offline ledger fallback loaded.', err: true);
+      _msg('No connection — showing local sales history.', neutral: true);
     } finally {
       if (mounted) setState(() => _refreshing = false);
     }

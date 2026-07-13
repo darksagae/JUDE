@@ -15,12 +15,53 @@ class AuditLogsView extends StatefulWidget {
 class _AuditLogsViewState extends State<AuditLogsView> {
   final _search = TextEditingController();
   String _type = 'All';
+  bool _refreshing = false;
 
   @override
   void dispose() {
     _search.dispose();
     super.dispose();
   }
+
+  // `neutral` is for expected offline/no-connection states — this app is
+  // designed to keep working without internet, so that isn't an error and
+  // shouldn't be flagged red like one.
+  void _msg(String text, {bool err = false, bool neutral = false}) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(text),
+      backgroundColor:
+          err ? AppColors.rose : (neutral ? AppColors.amber600 : AppColors.emerald),
+      behavior: SnackBarBehavior.floating,
+    ));
+  }
+
+  Future<void> _refresh() async {
+    final app = context.read<AppState>();
+    setState(() => _refreshing = true);
+    try {
+      if (app.offlineMode) {
+        _msg('Offline Mode: showing local audit trail.', neutral: true);
+      } else {
+        await app.triggerSync();
+        _msg('Audit trail synced with the cloud.');
+      }
+    } catch (_) {
+      _msg('No connection — showing local audit trail.', neutral: true);
+    } finally {
+      if (mounted) setState(() => _refreshing = false);
+    }
+  }
+
+  Widget _refreshBtn() => OutlinedButton.icon(
+        onPressed: _refreshing ? null : _refresh,
+        icon: _refreshing
+            ? const SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(strokeWidth: 2))
+            : const Icon(Icons.refresh, size: 14),
+        label: const Text('Pull Cloud Updates'),
+      );
 
   Color _typeColor(String t) {
     switch (t) {
@@ -47,16 +88,16 @@ class _AuditLogsViewState extends State<AuditLogsView> {
     }
   }
 
-  /// Deletion (and every other) action is visible up the hierarchy: a worker
-  /// sees only their own actions, a manager also sees workers' actions (so they
-  /// can see what staff deleted), and the top manager sees everything (what
-  /// both managers and workers deleted).
+  /// Mirrors the Staff Directory hierarchy rule: a worker sees only their own
+  /// actions, a manager sees everyone except the Top Manager (fellow managers
+  /// included — hiding peer managers' edits was an oversight, not intended
+  /// privacy), and the top manager sees everything.
   bool _visibleToRole(UserSession me, AuditLog l) {
     switch (me.role) {
       case UserRole.topManager:
         return true;
       case UserRole.manager:
-        return l.userRole == UserRole.worker || l.userId == me.userId;
+        return l.userRole != UserRole.topManager;
       case UserRole.worker:
         return l.userId == me.userId;
     }
@@ -86,30 +127,46 @@ class _AuditLogsViewState extends State<AuditLogsView> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(children: [
-            Container(
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                  color: const Color(0xFFECFDF5),
-                  borderRadius: BorderRadius.circular(10)),
-              child: const Icon(Icons.verified_user_outlined,
-                  size: 18, color: AppColors.emerald),
-            ),
-            const SizedBox(width: 10),
-            const Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('Detailed Audit Ledger',
-                      style: TextStyle(
-                          fontWeight: FontWeight.w600,
-                          color: AppColors.slate800)),
-                  Text('Deletions, edits, restocks and staff actions — workers see their own; managers also see staff actions; the top manager sees everything',
-                      style: TextStyle(fontSize: 11, color: AppColors.slate400)),
-                ],
+          LayoutBuilder(builder: (context, c) {
+            final narrow = c.maxWidth < 560;
+            final titleRow = Row(children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                    color: const Color(0xFFECFDF5),
+                    borderRadius: BorderRadius.circular(10)),
+                child: const Icon(Icons.verified_user_outlined,
+                    size: 18, color: AppColors.emerald),
               ),
-            ),
-          ]),
+              const SizedBox(width: 10),
+              const Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Detailed Audit Ledger',
+                        style: TextStyle(
+                            fontWeight: FontWeight.w600,
+                            color: AppColors.slate800)),
+                    Text('Deletions, edits, restocks and staff actions — workers see their own; managers see everyone except the top manager; the top manager sees everything',
+                        style:
+                            TextStyle(fontSize: 11, color: AppColors.slate400)),
+                  ],
+                ),
+              ),
+              if (!narrow) ...[const SizedBox(width: 10), _refreshBtn()],
+            ]);
+            if (narrow) {
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  titleRow,
+                  const SizedBox(height: 10),
+                  _refreshBtn(),
+                ],
+              );
+            }
+            return titleRow;
+          }),
           const SizedBox(height: 16),
           TextField(
             controller: _search,

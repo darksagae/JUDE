@@ -19,6 +19,7 @@ class DashboardView extends StatefulWidget {
 class _DashboardViewState extends State<DashboardView> {
   String _period = 'all';
   bool _balancing = false;
+  bool _refreshing = false;
   EndOfDayReport? _activeReport;
   final _ownerContact = TextEditingController(text: '+256 702 345 678');
 
@@ -26,6 +27,35 @@ class _DashboardViewState extends State<DashboardView> {
   void dispose() {
     _ownerContact.dispose();
     super.dispose();
+  }
+
+  // `neutral` is for expected offline/no-connection states — this app is
+  // designed to keep working without internet, so that isn't an error and
+  // shouldn't be flagged red like one.
+  void _msg(String text, {bool err = false, bool neutral = false}) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(text),
+      backgroundColor:
+          err ? AppColors.rose : (neutral ? AppColors.amber600 : AppColors.emerald),
+      behavior: SnackBarBehavior.floating,
+    ));
+  }
+
+  Future<void> _refresh() async {
+    final app = context.read<AppState>();
+    setState(() => _refreshing = true);
+    try {
+      if (app.offlineMode) {
+        _msg('Offline Mode: showing local sales data.', neutral: true);
+      } else {
+        await app.triggerSync();
+        _msg('Dashboard synced with the cloud.');
+      }
+    } catch (_) {
+      _msg('No connection — showing local sales data.', neutral: true);
+    } finally {
+      if (mounted) setState(() => _refreshing = false);
+    }
   }
 
   List<Sale> _filtered(List<Sale> sales) {
@@ -248,18 +278,32 @@ class _DashboardViewState extends State<DashboardView> {
               );
             }).toList(),
           ),
-          FilledButton.icon(
-            style: FilledButton.styleFrom(backgroundColor: AppColors.slate900),
-            onPressed: _balancing ? null : _runEod,
-            icon: _balancing
-                ? const SizedBox(
-                    width: 14,
-                    height: 14,
-                    child: CircularProgressIndicator(
-                        strokeWidth: 2, color: Colors.white))
-                : const Icon(Icons.auto_awesome, size: 14, color: AppColors.amber),
-            label: Text(_balancing ? 'Balancing...' : 'Automatic EOD Balance'),
-          ),
+          Wrap(spacing: 8, runSpacing: 8, children: [
+            OutlinedButton.icon(
+              onPressed: _refreshing ? null : _refresh,
+              icon: _refreshing
+                  ? const SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Icon(Icons.refresh, size: 14),
+              label: const Text('Pull Cloud Updates'),
+            ),
+            FilledButton.icon(
+              style:
+                  FilledButton.styleFrom(backgroundColor: AppColors.slate900),
+              onPressed: _balancing ? null : _runEod,
+              icon: _balancing
+                  ? const SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: Colors.white))
+                  : const Icon(Icons.auto_awesome,
+                      size: 14, color: AppColors.amber),
+              label: Text(_balancing ? 'Balancing...' : 'Automatic EOD Balance'),
+            ),
+          ]),
         ],
       ),
     );

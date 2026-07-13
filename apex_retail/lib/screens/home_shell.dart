@@ -42,7 +42,7 @@ class _HomeShellState extends State<HomeShell> {
     if (app.offlineMode) {
       if (!silent) {
         setState(() => _syncMsg =
-            'Offline Mode active. Turn it off to synchronize backups.');
+            'Offline Mode is on — working locally. Turn it off to sync with the cloud.');
         _clearMsgLater();
       }
       return;
@@ -56,9 +56,11 @@ class _HomeShellState extends State<HomeShell> {
             : 'Database synchronized with cloud. All terminals aligned.');
       }
     } catch (_) {
+      // No internet or the backend is briefly unreachable — this app is
+      // designed to keep working offline, so this isn't an error state.
       if (!silent && mounted) {
         setState(() => _syncMsg =
-            'Sync Deferred: Server backend unreachable. Offline buffer active.');
+            'No connection right now — working offline. Will sync automatically once back online.');
       }
     } finally {
       if (!silent && mounted) {

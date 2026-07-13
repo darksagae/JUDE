@@ -694,6 +694,13 @@ class AppState extends ChangeNotifier {
       reason: 'initial',
       notes: 'Initial stock setup',
     );
+    // Push immediately so the new commodity and its price appear on every
+    // other account/device without waiting for the next periodic sync tick
+    // (and isn't clobbered by a pull that lands first — whole-array replace,
+    // no merge, on the products collection).
+    if (!offlineMode) {
+      triggerSync().catchError((_) => SyncResult(false, 0));
+    }
     notifyListeners();
     return p;
   }
@@ -731,6 +738,11 @@ class AppState extends ChangeNotifier {
           '${session.role.label} ${session.name} edited "${updated.name}" '
           '(${updated.sku}): $changes');
     }
+    // Push immediately — a price/stock edit must reach every other
+    // account/device right away, not sit until the next periodic tick.
+    if (!offlineMode) {
+      triggerSync().catchError((_) => SyncResult(false, 0));
+    }
     notifyListeners();
   }
 
@@ -745,6 +757,9 @@ class AppState extends ChangeNotifier {
         'PRODUCT_DELETE',
         'Super Admin ${session.name} deleted "${p.name}" (${p.sku}) '
         'from inventory. Last stock: ${p.currentStock}; category: ${p.category}.');
+    if (!offlineMode) {
+      triggerSync().catchError((_) => SyncResult(false, 0));
+    }
     notifyListeners();
     return true;
   }
@@ -759,6 +774,9 @@ class AppState extends ChangeNotifier {
         'PRODUCT_UPDATE',
         '${session.name} ${p.isFavorite ? 'starred' : 'unstarred'} '
         '"${p.name}" (${p.sku}) for quick POS access');
+    if (!offlineMode) {
+      triggerSync().catchError((_) => SyncResult(false, 0));
+    }
     notifyListeners();
   }
 
@@ -813,6 +831,9 @@ class AppState extends ChangeNotifier {
         reason: 'restock',
         notes: 'Batch restock with different expiry $newExpirationDate',
       );
+      if (!offlineMode) {
+        triggerSync().catchError((_) => SyncResult(false, 0));
+      }
       notifyListeners();
       return {'type': 'new_batch', 'product': np};
     }
@@ -849,6 +870,9 @@ class AppState extends ChangeNotifier {
       reason: 'restock',
       notes: 'Manual stock-in replenishment',
     );
+    if (!offlineMode) {
+      triggerSync().catchError((_) => SyncResult(false, 0));
+    }
     notifyListeners();
     return {'type': 'merged', 'product': p};
   }
