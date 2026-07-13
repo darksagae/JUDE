@@ -1,0 +1,14 @@
+# This is a separate, already-independently-versioned repo
+# (github.com/aliizaron/Apex-Retail-Ledger) — not swept into this one.
+Apex-Retail-Ledger/
+
+# Local Claude Code tooling config, not project source.
+.claude/
+
+# Safety nets (each Flutter package also has its own .gitignore).
+*.log
+.env
+.env.*
+!.env.example
+build/
+.dart_tool/

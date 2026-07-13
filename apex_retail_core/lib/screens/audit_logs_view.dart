@@ -1,0 +1,251 @@
+import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+
+import 'package:apex_retail_core/data/app_state.dart';
+import 'package:apex_retail_core/models/models.dart';
+import 'package:apex_retail_core/theme.dart';
+import 'package:apex_retail_core/utils/format.dart';
+
+class AuditLogsView extends StatefulWidget {
+  const AuditLogsView({super.key});
+  @override
+  State<AuditLogsView> createState() => _AuditLogsViewState();
+}
+
+class _AuditLogsViewState extends State<AuditLogsView> {
+  final _search = TextEditingController();
+  String _type = 'All';
+
+  @override
+  void dispose() {
+    _search.dispose();
+    super.dispose();
+  }
+
+  Color _typeColor(String t) {
+    switch (t) {
+      case 'LOGIN':
+        return const Color(0xFF7C3AED);
+      case 'SALE':
+        return AppColors.emerald;
+      case 'STOCK_IN':
+        return AppColors.amber600;
+      case 'PRODUCT_UPDATE':
+        return AppColors.indigo;
+      case 'PRODUCT_CREATE':
+        return const Color(0xFF059669);
+      case 'PRODUCT_DELETE':
+        return AppColors.rose;
+      case 'CATEGORY_CREATE':
+      case 'CATEGORY_UPDATE':
+      case 'CATEGORY_DELETE':
+        return const Color(0xFF7C3AED);
+      case 'SYNC':
+        return const Color(0xFF0284C7);
+      default:
+        return AppColors.slate600;
+    }
+  }
+
+  /// Deletion (and every other) action is visible up the hierarchy: a worker
+  /// sees only their own actions, a manager also sees workers' actions (so they
+  /// can see what staff deleted), and the top manager sees everything (what
+  /// both managers and workers deleted).
+  bool _visibleToRole(UserSession me, AuditLog l) {
+    switch (me.role) {
+      case UserRole.topManager:
+        return true;
+      case UserRole.manager:
+        return l.userRole == UserRole.worker || l.userId == me.userId;
+      case UserRole.worker:
+        return l.userId == me.userId;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final app = context.watch<AppState>();
+    final authorized =
+        app.auditLogs.where((l) => _visibleToRole(app.session, l)).toList();
+    final types = <String>['All', ...{for (final l in authorized) l.actionType}];
+    final term = _search.text.toLowerCase();
+    final logs = authorized.where((l) {
+      final matchS = l.userName.toLowerCase().contains(term) ||
+          l.details.toLowerCase().contains(term);
+      final matchT = _type == 'All' || l.actionType == _type;
+      return matchS && matchT;
+    }).toList();
+
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppColors.slate100),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                  color: const Color(0xFFECFDF5),
+                  borderRadius: BorderRadius.circular(10)),
+              child: const Icon(Icons.verified_user_outlined,
+                  size: 18, color: AppColors.emerald),
+            ),
+            const SizedBox(width: 10),
+            const Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Detailed Audit Ledger',
+                      style: TextStyle(
+                          fontWeight: FontWeight.w600,
+                          color: AppColors.slate800)),
+                  Text('Deletions, edits, restocks and staff actions — workers see their own; managers also see staff actions; the top manager sees everything',
+                      style: TextStyle(fontSize: 11, color: AppColors.slate400)),
+                ],
+              ),
+            ),
+          ]),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _search,
+            onChanged: (_) => setState(() {}),
+            decoration: const InputDecoration(
+              prefixIcon: Icon(Icons.search, size: 18),
+              hintText: 'Search logs by staff name or details...',
+            ),
+          ),
+          const SizedBox(height: 10),
+          SizedBox(
+            height: 32,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: types.length,
+              separatorBuilder: (_, _) => const SizedBox(width: 6),
+              itemBuilder: (_, i) {
+                final t = types[i];
+                final active = _type == t;
+                return GestureDetector(
+                  onTap: () => setState(() => _type = t),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: active ? AppColors.slate900 : Colors.white,
+                      border: Border.all(color: AppColors.slate200),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Text(t,
+                        style: TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.w600,
+                            color: active ? Colors.white : AppColors.slate600)),
+                  ),
+                );
+              },
+            ),
+          ),
+          const SizedBox(height: 16),
+          if (logs.isEmpty)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 40),
+              child: Center(
+                  child: Text('No actions logged under current criteria',
+                      style: TextStyle(color: AppColors.slate400))),
+            )
+          else
+            ...logs.map(_logRow),
+        ],
+      ),
+    );
+  }
+
+  Widget _logRow(AuditLog log) {
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 4),
+      decoration: const BoxDecoration(
+          border: Border(bottom: BorderSide(color: AppColors.slate100))),
+      child: LayoutBuilder(builder: (context, c) {
+        final narrow = c.maxWidth < 560;
+        final badge = Container(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+          decoration: BoxDecoration(
+              color: _typeColor(log.actionType).withValues(alpha: 0.1),
+              borderRadius: BorderRadius.circular(6)),
+          child: Text(log.actionType,
+              style: TextStyle(
+                  fontSize: 9,
+                  fontWeight: FontWeight.bold,
+                  color: _typeColor(log.actionType))),
+        );
+        if (narrow) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(fmtDateTime(log.timestamp),
+                  style: const TextStyle(
+                      fontSize: 10, color: AppColors.slate400)),
+              const SizedBox(height: 4),
+              Row(children: [
+                Expanded(
+                  child: Text(log.userName,
+                      style: const TextStyle(
+                          fontSize: 12, fontWeight: FontWeight.w600)),
+                ),
+                badge,
+              ]),
+              const SizedBox(height: 4),
+              Text(log.details,
+                  style:
+                      const TextStyle(fontSize: 12, color: AppColors.slate600)),
+            ],
+          );
+        }
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(
+              width: 130,
+              child: Text(fmtDateTime(log.timestamp),
+                  style: const TextStyle(
+                      fontSize: 10, color: AppColors.slate400)),
+            ),
+            const SizedBox(width: 8),
+            SizedBox(
+              width: 110,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(log.userName,
+                      style: const TextStyle(
+                          fontSize: 12, fontWeight: FontWeight.w600)),
+                  Text(log.userRole.wire.toUpperCase(),
+                      style: TextStyle(
+                          fontSize: 9,
+                          fontWeight: FontWeight.bold,
+                          color: log.userRole == UserRole.topManager
+                              ? AppColors.amber600
+                              : log.userRole == UserRole.manager
+                                  ? AppColors.indigo
+                                  : AppColors.slate400)),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            badge,
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(log.details,
+                  style:
+                      const TextStyle(fontSize: 12, color: AppColors.slate600)),
+            ),
+          ],
+        );
+      }),
+    );
+  }
+}
