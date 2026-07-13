@@ -579,7 +579,10 @@ class _PosViewState extends State<PosView> {
               gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
                 maxCrossAxisExtent:
                     MediaQuery.sizeOf(context).width < 400 ? 160 : 230,
-                mainAxisExtent: 168,
+                // Was 168 — too tight now that out-of-stock cards also show a
+                // status tag (previously only Expired/Expiring did), which
+                // overflowed the fixed card height on real data.
+                mainAxisExtent: 190,
                 crossAxisSpacing: 12,
                 mainAxisSpacing: 12,
               ),

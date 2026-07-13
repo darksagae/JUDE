@@ -258,14 +258,7 @@ class _Header extends StatelessWidget {
     final textColor = isManager ? AppColors.slate900 : Colors.white;
     final compact = MediaQuery.sizeOf(context).width < 420;
 
-    // The header's own controls (including the A-/A+ font-scale control
-    // itself) must stay a stable, always-tappable size regardless of the
-    // app-wide content font scale — otherwise turning the scale up can grow
-    // this row until it overflows/misaligns and the control needed to turn
-    // it back down becomes unreachable.
-    return MediaQuery(
-      data: MediaQuery.of(context).copyWith(textScaler: TextScaler.noScaling),
-      child: Container(
+    return Container(
       width: double.infinity,
       decoration: BoxDecoration(
         color: bg,
@@ -367,35 +360,6 @@ class _Header extends StatelessWidget {
               child: Row(mainAxisSize: MainAxisSize.min, children: [
             // Loan alerts bell (overdue + due-soon count).
             _LoanBell(isManager: isManager),
-            const SizedBox(width: 8),
-            // Font size control.
-            _pill(
-              isManager,
-              child: Row(mainAxisSize: MainAxisSize.min, children: [
-                InkWell(
-                  onTap: () => app.setFontScale(app.fontScale - 0.1),
-                  child: Icon(Icons.text_decrease,
-                      size: 15,
-                      color:
-                          isManager ? AppColors.slate600 : AppColors.slate400),
-                ),
-                const SizedBox(width: 6),
-                Text('${(app.fontScale * 100).round()}%',
-                    style: TextStyle(
-                        fontSize: 10,
-                        color: isManager
-                            ? AppColors.slate600
-                            : AppColors.slate400)),
-                const SizedBox(width: 6),
-                InkWell(
-                  onTap: () => app.setFontScale(app.fontScale + 0.1),
-                  child: Icon(Icons.text_increase,
-                      size: 15,
-                      color:
-                          isManager ? AppColors.slate600 : AppColors.slate400),
-                ),
-              ]),
-            ),
             const SizedBox(width: 8),
             _pill(
               isManager,
@@ -529,7 +493,6 @@ class _Header extends StatelessWidget {
             ),
           ),
         ],
-      ),
       ),
     );
   }

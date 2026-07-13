@@ -24,14 +24,11 @@ class JudeFarmSupplyAdminApp extends StatelessWidget {
         title: AppBranding.adminAppTitle,
         debugShowCheckedModeBanner: false,
         theme: managerTheme(),
-        builder: (context, child) {
-          final scale = context.watch<AppState>().fontScale;
-          final mq = MediaQuery.of(context);
-          return MediaQuery(
-            data: mq.copyWith(textScaler: TextScaler.linear(scale)),
-            child: child!,
-          );
-        },
+        // Fixed at the default medium font size — no per-account adjustment.
+        builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(context).copyWith(textScaler: TextScaler.noScaling),
+          child: child!,
+        ),
         home: const _AdminRoot(),
       ),
     );

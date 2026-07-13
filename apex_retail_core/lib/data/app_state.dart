@@ -29,7 +29,6 @@ class AppState extends ChangeNotifier {
   static const _kServerUrl = 'sm_server_url';
   static const _kLoans = 'sm_loans';
   static const _kExpenses = 'sm_expenses';
-  static const _kFontScale = 'sm_font_scale';
   static const _kSidebarCollapsed = 'sm_sidebar_collapsed';
   // Sequential account-ID allocation (IDs are issued in order and never reused).
   static const _kIdCounters = 'sm_id_counters';
@@ -61,7 +60,6 @@ class AppState extends ChangeNotifier {
   bool offlineMode = false;
   String expiredControl = 'restrict'; // 'restrict' | 'allow'
   String serverUrl = '';
-  double fontScale = 1.0; // adjustable UI font size (0.8 – 1.6)
   bool sidebarCollapsed = false; // worker can hide the nav for a bigger grid
 
   // Highest sequential number issued per account-ID prefix (W/M/TM), and the
@@ -113,7 +111,6 @@ class AppState extends ChangeNotifier {
     serverUrl = _prefs.getString(_kServerUrl) ?? defaultServerUrl;
     // View preferences are stored per account so several people sharing one
     // device each keep their own settings.
-    fontScale = _prefs.getDouble(_scoped(_kFontScale)) ?? 1.0;
     sidebarCollapsed = _prefs.getBool(_scoped(_kSidebarCollapsed)) ?? false;
 
     _loadIdState();
@@ -334,7 +331,6 @@ class AppState extends ChangeNotifier {
     _prefs.setString(_kSession, jsonEncode(s.toJson()));
     // Load this account's own view preferences (kept separate per account so a
     // shared device doesn't mix them between users).
-    fontScale = _prefs.getDouble(_scoped(_kFontScale)) ?? 1.0;
     sidebarCollapsed = _prefs.getBool(_scoped(_kSidebarCollapsed)) ?? false;
     if (logLogin) {
       logAction(s.userId, s.name, s.role, 'LOGIN',
@@ -357,7 +353,6 @@ class AppState extends ChangeNotifier {
     homeSession = null;
     session = home;
     _prefs.setString(_kSession, jsonEncode(home.toJson()));
-    fontScale = _prefs.getDouble(_scoped(_kFontScale)) ?? 1.0;
     sidebarCollapsed = _prefs.getBool(_scoped(_kSidebarCollapsed)) ?? false;
     notifyListeners();
   }
@@ -384,12 +379,6 @@ class AppState extends ChangeNotifier {
   void setServerUrl(String url) {
     serverUrl = url.trim();
     _prefs.setString(_kServerUrl, serverUrl);
-    notifyListeners();
-  }
-
-  void setFontScale(double v) {
-    fontScale = v.clamp(0.8, 1.6);
-    _prefs.setDouble(_scoped(_kFontScale), fontScale);
     notifyListeners();
   }
 
@@ -1189,8 +1178,34 @@ class AppState extends ChangeNotifier {
     _persistReports();
   }
 
-  void replaceLoans(List<Loan> l) {
-    loans = l;
+  /// Merges (not overwrites) the incoming cloud/master loan list with what's
+  /// already here. A blind replace let a stale or partial sync response
+  /// silently revert a payment just recorded on this device, or drop a loan
+  /// registered while offline that hadn't reached the server yet. Since
+  /// amountPaid/originalAmount/payments only ever grow during normal use,
+  /// "furthest along" reliably means "most up to date" on either side.
+  void replaceLoans(List<Loan> incoming) {
+    final localById = {for (final l in loans) l.id: l};
+    final merged = <Loan>[];
+    final seen = <String>{};
+    for (final inc in incoming) {
+      final local = localById[inc.id];
+      if (local == null) {
+        merged.add(inc);
+      } else {
+        final incomingIsFurtherAlong = inc.amountPaid >= local.amountPaid &&
+            inc.originalAmount >= local.originalAmount &&
+            inc.payments.length >= local.payments.length;
+        merged.add(incomingIsFurtherAlong ? inc : local);
+      }
+      seen.add(inc.id);
+    }
+    // Keep local-only loans the server doesn't know about yet (e.g.
+    // registered offline and not successfully pushed).
+    for (final l in loans) {
+      if (!seen.contains(l.id)) merged.add(l);
+    }
+    loans = merged;
     _persistLoans();
   }
 
