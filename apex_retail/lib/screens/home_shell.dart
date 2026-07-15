@@ -149,7 +149,10 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   Widget _buildContent(bool isManager) {
-    final bg = isManager ? AppColors.slate50 : AppColors.workerBg;
+    // The working area is light for everyone (manager and worker alike) so the
+    // light-themed screens read clearly. The worker keeps the dark header/nav
+    // for station branding; only the content surface is bright.
+    const bg = AppColors.slate50;
     Widget child;
     switch (_tab) {
       case 'pos':
@@ -191,11 +194,18 @@ class _HomeShellState extends State<HomeShell> {
       default:
         child = const PosView();
     }
-    return Container(
-      color: bg,
-      child: SingleChildScrollView(
-        padding: Responsive.pagePadding(context),
-        child: child,
+    // The worker shell runs under the dark theme (for its header/nav), which
+    // makes default text white. Wrap the content in the light theme so text
+    // that doesn't set an explicit colour stays dark and readable on the light
+    // surface. Managers are already light; this is harmless for them.
+    return Theme(
+      data: managerTheme(),
+      child: Container(
+        color: bg,
+        child: SingleChildScrollView(
+          padding: Responsive.pagePadding(context),
+          child: child,
+        ),
       ),
     );
   }
@@ -218,7 +228,7 @@ class _HomeShellState extends State<HomeShell> {
                 const SizedBox(height: 16),
                 const Text('Authorized Access Only',
                     style: TextStyle(
-                        color: Colors.white,
+                        color: AppColors.slate900,
                         fontWeight: FontWeight.w800,
                         fontSize: 16)),
                 const SizedBox(height: 8),

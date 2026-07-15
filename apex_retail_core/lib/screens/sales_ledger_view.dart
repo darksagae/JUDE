@@ -66,7 +66,10 @@ class _SalesLedgerViewState extends State<SalesLedgerView> {
     }
     setState(() => _exportingCsv = true);
     try {
-      await exportSalesCsv(sales);
+      final path = await exportSalesCsv(sales);
+      if (mounted && path != null) {
+        _msg('CSV saved to $path');
+      }
     } catch (_) {
       _msg('Could not export CSV on this device.', err: true);
     } finally {

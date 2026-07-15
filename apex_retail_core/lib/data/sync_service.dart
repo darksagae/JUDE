@@ -110,6 +110,20 @@ class SyncService {
                 StaffProfile.fromJson(Map<String, dynamic>.from(e as Map)))
             .toList());
       }
+      // Purge records deleted on another device. Must run AFTER the merges above
+      // because replaceLoans keeps local-only loans and would otherwise retain a
+      // loan the server has deleted.
+      if (data['deletions'] != null) {
+        final d = Map<String, dynamic>.from(data['deletions'] as Map);
+        List<String> ids(String k) =>
+            ((d[k] as List?) ?? const []).map((e) => '$e').toList();
+        app.applyServerDeletions(
+          sales: ids('sales'),
+          products: ids('products'),
+          loans: ids('loans'),
+          expenses: ids('expenses'),
+        );
+      }
     }
     return SyncResult(true, unsynced.length);
   }
@@ -137,30 +151,127 @@ class SyncService {
   }
 
   /// Authoritatively upserts one staff member to Neon (managerial action).
-  /// Best-effort: silently no-ops offline; the local change still stands.
-  Future<void> saveStaffMember(StaffProfile p) async {
-    if (app.offlineMode || !_hasServer) return;
+  /// Returns the server's authoritative staff directory on success so the
+  /// caller can adopt it (confirming the create/edit landed in the database);
+  /// returns null offline or on any failure, leaving the local change to stand.
+  Future<List<StaffProfile>?> saveStaffMember(StaffProfile p) async {
+    if (app.offlineMode || !_hasServer) return null;
     try {
-      await http
+      final resp = await http
           .post(Uri.parse('$_base/api/staff/save'),
               headers: {'Content-Type': 'application/json'},
               body: jsonEncode(
                   {'staff': p.toJson(), 'role': app.session.role.wire}))
           .timeout(const Duration(seconds: 12));
-    } catch (_) {}
+      if (resp.statusCode != 200) return null;
+      final data = jsonDecode(resp.body) as Map<String, dynamic>;
+      if (data['success'] == true && data['staff'] != null) {
+        return ((data['staff'] as List))
+            .map((e) =>
+                StaffProfile.fromJson(Map<String, dynamic>.from(e as Map)))
+            .toList();
+      }
+    } catch (_) {
+      // offline / unreachable → caller keeps the optimistic local change
+    }
+    return null;
   }
 
   /// Authoritatively removes one staff member from Neon (managerial action).
-  Future<void> deleteStaffMember(String userId) async {
-    if (app.offlineMode || !_hasServer) return;
+  /// Returns the server's authoritative staff directory on success so the
+  /// caller can adopt it (making the delete stick); returns null offline or on
+  /// any failure.
+  Future<List<StaffProfile>?> deleteStaffMember(String userId) async {
+    if (app.offlineMode || !_hasServer) return null;
     try {
-      await http
+      final resp = await http
           .post(Uri.parse('$_base/api/staff/delete'),
               headers: {'Content-Type': 'application/json'},
               body: jsonEncode(
                   {'userId': userId, 'role': app.session.role.wire}))
           .timeout(const Duration(seconds: 12));
+      if (resp.statusCode != 200) return null;
+      final data = jsonDecode(resp.body) as Map<String, dynamic>;
+      if (data['success'] == true && data['staff'] != null) {
+        return ((data['staff'] as List))
+            .map((e) =>
+                StaffProfile.fromJson(Map<String, dynamic>.from(e as Map)))
+            .toList();
+      }
+    } catch (_) {
+      // offline / unreachable → caller keeps the optimistic local change
+    }
+    return null;
+  }
+
+  /// Authoritatively deletes a product from Neon (Top Manager action). The bulk
+  /// sync only upserts products, so a deletion must go through this route or the
+  /// product reappears on the next pull. Returns the server's authoritative
+  /// product list on success so the caller can adopt it; null offline/on failure.
+  Future<List<Product>?> deleteProduct(String productId) async {
+    if (app.offlineMode || !_hasServer) return null;
+    try {
+      final resp = await http
+          .post(Uri.parse('$_base/api/products/delete'),
+              headers: {'Content-Type': 'application/json'},
+              body: jsonEncode(
+                  {'productId': productId, 'role': app.session.role.wire}))
+          .timeout(const Duration(seconds: 12));
+      if (resp.statusCode != 200) return null;
+      final data = jsonDecode(resp.body) as Map<String, dynamic>;
+      if (data['success'] == true && data['products'] != null) {
+        return ((data['products'] as List))
+            .map((e) => Product.fromJson(Map<String, dynamic>.from(e as Map)))
+            .toList();
+      }
+    } catch (_) {
+      // offline / unreachable → caller keeps the optimistic local removal
+    }
+    return null;
+  }
+
+  /// Authoritatively deletes a loan from Neon (Top Manager action). Returns the
+  /// server's authoritative loan list on success; null offline/on failure.
+  Future<List<Loan>?> deleteLoan(String loanId) async {
+    if (app.offlineMode || !_hasServer) return null;
+    try {
+      final resp = await http
+          .post(Uri.parse('$_base/api/loans/delete'),
+              headers: {'Content-Type': 'application/json'},
+              body: jsonEncode(
+                  {'loanId': loanId, 'role': app.session.role.wire}))
+          .timeout(const Duration(seconds: 12));
+      if (resp.statusCode != 200) return null;
+      final data = jsonDecode(resp.body) as Map<String, dynamic>;
+      if (data['success'] == true && data['loans'] != null) {
+        return ((data['loans'] as List))
+            .map((e) => Loan.fromJson(Map<String, dynamic>.from(e as Map)))
+            .toList();
+      }
     } catch (_) {}
+    return null;
+  }
+
+  /// Authoritatively deletes an expense from Neon (Top Manager action). Returns
+  /// the server's authoritative expense list on success; null offline/on failure.
+  Future<List<Expense>?> deleteExpense(String expenseId) async {
+    if (app.offlineMode || !_hasServer) return null;
+    try {
+      final resp = await http
+          .post(Uri.parse('$_base/api/expenses/delete'),
+              headers: {'Content-Type': 'application/json'},
+              body: jsonEncode(
+                  {'expenseId': expenseId, 'role': app.session.role.wire}))
+          .timeout(const Duration(seconds: 12));
+      if (resp.statusCode != 200) return null;
+      final data = jsonDecode(resp.body) as Map<String, dynamic>;
+      if (data['success'] == true && data['expenses'] != null) {
+        return ((data['expenses'] as List))
+            .map((e) => Expense.fromJson(Map<String, dynamic>.from(e as Map)))
+            .toList();
+      }
+    } catch (_) {}
+    return null;
   }
 
   Future<bool> voidSale(String saleId) async {

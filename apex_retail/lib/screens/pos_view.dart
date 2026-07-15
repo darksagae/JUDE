@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:apex_retail_core/apex_retail_core.dart';
 
@@ -164,27 +165,9 @@ class _PosViewState extends State<PosView> {
 
   Future<void> _addToCart(Product p) async {
     if (p.currentStock <= 0) return;
-    final app = context.read<AppState>();
-    if (isProductExpired(p)) {
-      if (app.expiredControl == 'restrict') {
-        final pass = await _promptPasscode(p);
-        if (pass == null) return;
-        if (app.supervisorPasscodeMatches(pass)) {
-          app.logAction(app.session.userId, app.session.name, app.session.role,
-              'EXPIRED_BYPASS',
-              'Authorized sale of expired commodity: ${p.name} (SKU: ${p.sku})');
-          _toast('Override authorized. Product added to cart.',
-              color: AppColors.emerald);
-        } else {
-          _toast('Authorization failed. Incorrect supervisor passcode.',
-              color: AppColors.rose);
-          return;
-        }
-      } else {
-        final ok = await _confirmExpired(p);
-        if (ok != true) return;
-      }
-    }
+    // Expired commodities are sold freely (no supervisor passcode / warning) —
+    // moving expired stock out at any price beats a total write-off. Pricing is
+    // unchanged: the per-line floor is simply 0 for expired stock.
     setState(() {
       final existing =
           _cart.where((c) => c.product.id == p.id).cast<_CartLine?>().firstOrNull;
@@ -199,51 +182,6 @@ class _PosViewState extends State<PosView> {
       }
     });
   }
-
-  Future<String?> _promptPasscode(Product p) {
-    final ctrl = TextEditingController();
-    return showDialog<String>(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('Expired Commodity Restricted'),
-        content: Column(mainAxisSize: MainAxisSize.min, children: [
-          Text(
-              '"${p.name}" is EXPIRED and restricted by store policy. Enter a Manager or Top Manager passcode to bypass:',
-              style: const TextStyle(fontSize: 13)),
-          const SizedBox(height: 12),
-          TextField(
-              controller: ctrl,
-              obscureText: true,
-              autofocus: true,
-              decoration: const InputDecoration(hintText: 'Supervisor passcode')),
-        ]),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
-          FilledButton(
-              onPressed: () => Navigator.pop(context, ctrl.text.trim()),
-              child: const Text('Authorize')),
-        ],
-      ),
-    );
-  }
-
-  Future<bool?> _confirmExpired(Product p) => showDialog<bool>(
-        context: context,
-        builder: (_) => AlertDialog(
-          title: const Text('Expired Warning'),
-          content: Text(
-              '"${p.name}" is EXPIRED. Add this expired commodity to checkout anyway?'),
-          actions: [
-            TextButton(
-                onPressed: () => Navigator.pop(context, false),
-                child: const Text('Cancel')),
-            FilledButton(
-                onPressed: () => Navigator.pop(context, true),
-                child: const Text('Add Anyway')),
-          ],
-        ),
-      );
 
   void _scanSku(String value, List<Product> products) {
     final sku = value.trim().toUpperCase();
@@ -277,6 +215,22 @@ class _PosViewState extends State<PosView> {
 
   Future<void> _checkout() async {
     if (_cart.isEmpty) return;
+    // Hard floor guard — runs BEFORE _syncCartFromFields (which would silently
+    // revert a below-limit price back to the default). We read the price exactly
+    // as typed, and if any non-expired line is below its limit we refuse the
+    // whole checkout: no reverting, no receipt. The inventory rules (cost ≤
+    // limit ≤ selling) are the source of truth; the POS just enforces them.
+    // Expired stock has floor 0 and is exempt.
+    for (final line in _cart) {
+      final typed = num.tryParse(line.priceCtrl.text.trim()) ?? line.unitPrice;
+      if (line.floor > 0 && typed < line.floor) {
+        _toast(
+            '${line.product.name}: price ${shs(typed)} is below the limit '
+            '${shs(line.floor)}. No receipt — adjust the price to sell.',
+            color: AppColors.rose);
+        return;
+      }
+    }
     _syncCartFromFields();
     if (_cart.isEmpty) return;
     final app = context.read<AppState>();
@@ -299,6 +253,11 @@ class _PosViewState extends State<PosView> {
         loanAmount = total - cashVal;
         if (_customerName.text.trim().isEmpty) {
           _toast('Customer name is required for the loan balance',
+              color: AppColors.amber600);
+          return;
+        }
+        if (_customerContact.text.trim().length != 10) {
+          _toast('Contact must be exactly 10 digits for a loan sale',
               color: AppColors.amber600);
           return;
         }
@@ -1169,8 +1128,15 @@ class _PosViewState extends State<PosView> {
             Expanded(
               child: TextField(
                 controller: _customerContact,
+                keyboardType: TextInputType.phone,
+                inputFormatters: [
+                  FilteringTextInputFormatter.digitsOnly,
+                  LengthLimitingTextInputFormatter(10),
+                ],
                 decoration: const InputDecoration(
-                    labelText: 'Contact', isDense: true),
+                    labelText: 'Contact (10 digits) *',
+                    counterText: '',
+                    isDense: true),
               ),
             ),
           ]),

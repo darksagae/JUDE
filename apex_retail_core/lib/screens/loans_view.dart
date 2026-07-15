@@ -9,8 +9,11 @@ import 'package:apex_retail_core/utils/format.dart';
 import 'package:apex_retail_core/utils/responsive.dart';
 
 class LoansView extends StatefulWidget {
-  // Loans are only ever registered from the POS checkout flow — the Admin
-  // console is read-only for creation (it can still record payments).
+  // Loans are only ever created and topped up from the POS checkout flow.
+  // This view only views loans, records payments, and (top manager) deletes.
+  // `canRegister` is retained but unused — the register/top-up UI is gone
+  // regardless of its value. Kept so hot reload doesn't choke on removing a
+  // field from this const class.
   final bool canRegister;
   const LoansView({super.key, this.canRegister = true});
   @override
@@ -90,14 +93,8 @@ class _LoansViewState extends State<LoansView> {
                   : const Icon(Icons.refresh, size: 14),
               label: const Text('Pull Cloud Updates'),
             ),
-            if (widget.canRegister)
-              FilledButton.icon(
-                style:
-                    FilledButton.styleFrom(backgroundColor: AppColors.indigo),
-                onPressed: () => _openLoanForm(app),
-                icon: const Icon(Icons.add, size: 16),
-                label: const Text('Register Loan'),
-              ),
+            // Loans are created only at POS checkout (partial-payment sales) —
+            // there is intentionally no manual "Register Loan" action here.
           ]),
         ),
         const SizedBox(height: 16),
@@ -264,7 +261,10 @@ class _LoansViewState extends State<LoansView> {
         : overdue
             ? 'OVERDUE'
             : 'Due in ${l.daysUntilDue()}d';
-    return Container(
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => _showLoanDetails(app, l),
+      child: Container(
       margin: const EdgeInsets.only(bottom: 10),
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
@@ -341,15 +341,8 @@ class _LoansViewState extends State<LoansView> {
                   minimumSize: const Size(0, 34),
                   foregroundColor: AppColors.emerald),
             ),
-          if (widget.canRegister)
-            OutlinedButton.icon(
-              onPressed: () => _addToLoan(app, l),
-              icon: const Icon(Icons.add_circle_outline, size: 14),
-              label: const Text('Add to Loan'),
-              style: OutlinedButton.styleFrom(
-                  minimumSize: const Size(0, 34),
-                  foregroundColor: AppColors.amber600),
-            ),
+          // "Add to Loan" removed — additional credit is only ever taken on
+          // through a POS checkout sale, never added manually here.
           if (app.session.role == UserRole.topManager)
             IconButton(
               tooltip: 'Delete',
@@ -359,59 +352,154 @@ class _LoansViewState extends State<LoansView> {
             ),
         ]),
       ]),
+      ),
     );
   }
 
-  void _openLoanForm(AppState app) {
-    final name = TextEditingController();
-    final contact = TextEditingController();
-    final amount = TextEditingController();
-    final notes = TextEditingController();
-    final pledge = TextEditingController(
-        text: DateTime.now()
-            .add(const Duration(days: 7))
-            .toIso8601String()
-            .substring(0, 10));
+  void _showLoanDetails(AppState app, Loan l) {
+    final settled = l.isSettled;
+    final overdue = l.isOverdue();
+    final statusColor = settled
+        ? AppColors.emerald
+        : overdue
+            ? AppColors.rose
+            : (l.daysUntilDue() <= 3 ? AppColors.amber600 : AppColors.indigo);
+    final statusText = settled
+        ? 'FULLY PAID'
+        : overdue
+            ? 'OVERDUE'
+            : 'Due in ${l.daysUntilDue()} day(s)';
+
     showDialog(
       context: context,
-      builder: (ctx) => StatefulBuilder(builder: (ctx, setModal) {
-        return AlertDialog(
-          title: const Text('Register a Loan'),
-          content: ConstrainedBox(
-            constraints: BoxConstraints(
-                maxWidth: Responsive.dialogWidth(ctx, max: 400)),
-            child: SingleChildScrollView(
-              child: Column(mainAxisSize: MainAxisSize.min, children: [
-                _f('Customer full name *', name),
-                _f('Contact (phone) ', contact),
-                _f('Loan amount (shs) *', amount, num: true),
-                _dateField('Pledged repayment date *', pledge, ctx, setModal),
-                _f('Notes', notes),
-              ]),
+      builder: (ctx) => AlertDialog(
+        title: Row(children: [
+          Expanded(
+            child: Text(l.customerName,
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+          ),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+            decoration: BoxDecoration(
+                color: statusColor.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(6)),
+            child: Text(statusText,
+                style: TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
+                    color: statusColor)),
+          ),
+        ]),
+        content: ConstrainedBox(
+          constraints:
+              BoxConstraints(maxWidth: Responsive.dialogWidth(ctx, max: 380)),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _detailRow('Contact', l.customerContact.isEmpty
+                    ? 'Not provided'
+                    : l.customerContact),
+                _detailRow('Original amount', shs(l.originalAmount)),
+                _detailRow('Amount paid', shs(l.amountPaid)),
+                _detailRow('Outstanding balance', shs(l.balance),
+                    color: settled ? AppColors.emerald : statusColor,
+                    bold: true),
+                _detailRow('Pledged repayment', l.pledgeDate),
+                if (l.saleId != null) _detailRow('Linked sale', l.saleId!),
+                if (l.createdByName.isNotEmpty)
+                  _detailRow('Registered by', l.createdByName),
+                if (l.createdAt.isNotEmpty)
+                  _detailRow('Registered on', fmtDateTime(l.createdAt)),
+                if (l.notes != null && l.notes!.trim().isNotEmpty)
+                  _detailRow('Notes', l.notes!),
+                const SizedBox(height: 10),
+                Text('Payment history (${l.payments.length})',
+                    style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: AppColors.slate700)),
+                const SizedBox(height: 4),
+                if (l.payments.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 6),
+                    child: Text('No payments recorded yet.',
+                        style: TextStyle(
+                            fontSize: 12, color: AppColors.slate400)),
+                  )
+                else
+                  ...l.payments.map((p) => Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 4),
+                        child: Row(children: [
+                          const Icon(Icons.payments_outlined,
+                              size: 14, color: AppColors.emerald),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(shs(p.amount),
+                                    style: const TextStyle(
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w600)),
+                                Text(
+                                    '${fmtDateTime(p.timestamp)}'
+                                    '${p.receivedByName.isNotEmpty ? ' • ${p.receivedByName}' : ''}',
+                                    style: const TextStyle(
+                                        fontSize: 10,
+                                        color: AppColors.slate400)),
+                              ],
+                            ),
+                          ),
+                        ]),
+                      )),
+              ],
             ),
           ),
-          actions: [
-            TextButton(
-                onPressed: () => Navigator.pop(ctx),
-                child: const Text('Cancel')),
-            FilledButton(
+        ),
+        actions: [
+          if (!settled)
+            FilledButton.icon(
+              style:
+                  FilledButton.styleFrom(backgroundColor: AppColors.emerald),
               onPressed: () {
-                final amt = num.tryParse(amount.text);
-                if (name.text.trim().isEmpty || amt == null || amt <= 0) return;
-                app.addLoan(
-                  customerName: name.text.trim(),
-                  customerContact: contact.text.trim(),
-                  amount: amt,
-                  pledgeDate: pledge.text.trim(),
-                  notes: notes.text.trim().isEmpty ? null : notes.text.trim(),
-                );
                 Navigator.pop(ctx);
+                _recordPayment(app, l);
               },
-              child: const Text('Register Loan'),
+              icon: const Icon(Icons.payments_outlined, size: 16),
+              label: const Text('Record Payment'),
             ),
-          ],
-        );
-      }),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Close')),
+        ],
+      ),
+    );
+  }
+
+  Widget _detailRow(String label, String value,
+      {Color? color, bool bold = false}) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 130,
+            child: Text(label,
+                style:
+                    const TextStyle(fontSize: 12, color: AppColors.slate500)),
+          ),
+          Expanded(
+            child: Text(value,
+                style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: bold ? FontWeight.bold : FontWeight.w500,
+                    color: color ?? AppColors.slate800)),
+          ),
+        ],
+      ),
     );
   }
 
@@ -451,45 +539,6 @@ class _LoansViewState extends State<LoansView> {
     );
   }
 
-  void _addToLoan(AppState app, Loan l) {
-    final amount = TextEditingController();
-    final notes = TextEditingController();
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text('Add to Loan — ${l.customerName}',
-            style: const TextStyle(fontSize: 16)),
-        content: ConstrainedBox(
-          constraints: BoxConstraints(
-              maxWidth: Responsive.dialogWidth(ctx, max: 320)),
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            Text('Current balance: ${shs(l.balance)}',
-                style: const TextStyle(fontSize: 12, color: AppColors.slate500)),
-            const SizedBox(height: 8),
-            _f('Additional amount (shs) *', amount, num: true),
-            _f('Notes', notes),
-          ]),
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('Cancel')),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: AppColors.amber600),
-            onPressed: () {
-              final amt = num.tryParse(amount.text);
-              if (amt == null || amt <= 0) return;
-              app.increaseLoan(l.id, amt,
-                  notes: notes.text.trim().isEmpty ? null : notes.text.trim());
-              Navigator.pop(ctx);
-            },
-            child: const Text('Add to Loan'),
-          ),
-        ],
-      ),
-    );
-  }
-
   Widget _f(String label, TextEditingController c, {bool num = false}) =>
       Padding(
         padding: const EdgeInsets.symmetric(vertical: 6),
@@ -500,31 +549,4 @@ class _LoansViewState extends State<LoansView> {
           decoration: InputDecoration(labelText: label),
         ),
       );
-
-  Widget _dateField(String label, TextEditingController c, BuildContext ctx,
-      void Function(void Function()) setModal) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 6),
-      child: TextField(
-        controller: c,
-        readOnly: true,
-        decoration: InputDecoration(
-          labelText: label,
-          suffixIcon: const Icon(Icons.calendar_today, size: 16),
-        ),
-        onTap: () async {
-          final init = DateTime.tryParse(c.text) ?? DateTime.now();
-          final picked = await showDatePicker(
-            context: ctx,
-            initialDate: init,
-            firstDate: DateTime.now().subtract(const Duration(days: 30)),
-            lastDate: DateTime(2032),
-          );
-          if (picked != null) {
-            setModal(() => c.text = picked.toIso8601String().substring(0, 10));
-          }
-        },
-      ),
-    );
-  }
 }

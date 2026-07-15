@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart'
+    show kIsWeb, defaultTargetPlatform, TargetPlatform;
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
@@ -62,18 +64,46 @@ String buildSalesCsv(List<Sale> sales) {
   return buf.toString();
 }
 
-/// Writes the CSV to a temp file and opens the platform share/save sheet so
-/// the user can save it wherever they like (or open it straight in Excel).
-Future<void> exportSalesCsv(List<Sale> sales, {String? filenamePrefix}) async {
+/// Exports the sales as a CSV. On mobile (Android/iOS) this opens the platform
+/// share sheet. On desktop (Linux/Windows/macOS) — where share_plus has no
+/// registered plugin and would throw — it writes the file into the user's
+/// Downloads folder and returns the saved path so the caller can show it.
+///
+/// Returns the absolute file path when saved to disk (desktop), or null when
+/// the file was handed off via the share sheet (mobile).
+Future<String?> exportSalesCsv(List<Sale> sales, {String? filenamePrefix}) async {
   final csv = buildSalesCsv(sales);
-  final dir = await getTemporaryDirectory();
-  final stamp = DateTime.now().toIso8601String().replaceAll(RegExp(r'[:.]'), '-');
-  final file = File('${dir.path}/${filenamePrefix ?? 'sales_ledger'}_$stamp.csv');
   // A UTF-8 BOM so Excel (which otherwise guesses ANSI on some locales and
   // mangles non-ASCII text) opens the file as UTF-8 correctly.
-  await file.writeAsBytes([0xEF, 0xBB, 0xBF, ...utf8.encode(csv)]);
-  await SharePlus.instance.share(ShareParams(
-    files: [XFile(file.path, mimeType: 'text/csv')],
-    fileNameOverrides: [file.uri.pathSegments.last],
-  ));
+  final bytes = <int>[0xEF, 0xBB, 0xBF, ...utf8.encode(csv)];
+  final stamp = DateTime.now().toIso8601String().replaceAll(RegExp(r'[:.]'), '-');
+  final filename = '${filenamePrefix ?? 'sales_ledger'}_$stamp.csv';
+
+  final isMobile = !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.android ||
+          defaultTargetPlatform == TargetPlatform.iOS);
+
+  if (isMobile) {
+    final dir = await getTemporaryDirectory();
+    final file = File('${dir.path}/$filename');
+    await file.writeAsBytes(bytes);
+    await SharePlus.instance.share(ShareParams(
+      files: [XFile(file.path, mimeType: 'text/csv')],
+      fileNameOverrides: [filename],
+    ));
+    return null;
+  }
+
+  // Desktop: save straight to Downloads (fall back to Documents, then temp) and
+  // report the path — no share sheet exists on these platforms.
+  Directory? dir;
+  try {
+    dir = await getDownloadsDirectory();
+  } catch (_) {
+    dir = null;
+  }
+  dir ??= await getApplicationDocumentsDirectory();
+  final file = File('${dir.path}/$filename');
+  await file.writeAsBytes(bytes);
+  return file.path;
 }

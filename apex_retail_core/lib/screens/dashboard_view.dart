@@ -58,31 +58,36 @@ class _DashboardViewState extends State<DashboardView> {
     }
   }
 
-  List<Sale> _filtered(List<Sale> sales) {
+  /// Whether a local timestamp falls inside the currently-selected period.
+  /// Shared by sales and loan-repayment aggregation so both use one definition.
+  bool _inPeriod(DateTime local) {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     final yesterday = today.subtract(const Duration(days: 1));
+    final day = DateTime(local.year, local.month, local.day);
+    switch (_period) {
+      case 'today':
+        return day == today;
+      case 'yesterday':
+        return day == yesterday;
+      case 'weekly':
+        final d = today.difference(day).inDays;
+        return d >= 0 && d <= 7;
+      case 'monthly':
+        final d = today.difference(day).inDays;
+        return d >= 0 && d <= 30;
+      case 'yearly':
+        return local.year == now.year;
+      default:
+        return true;
+    }
+  }
+
+  List<Sale> _filtered(List<Sale> sales) {
     return sales.where((s) {
       final dt = DateTime.tryParse(s.timestamp);
       if (dt == null) return false;
-      final local = dt.toLocal();
-      final day = DateTime(local.year, local.month, local.day);
-      switch (_period) {
-        case 'today':
-          return day == today;
-        case 'yesterday':
-          return day == yesterday;
-        case 'weekly':
-          final d = today.difference(day).inDays;
-          return d >= 0 && d <= 7;
-        case 'monthly':
-          final d = today.difference(day).inDays;
-          return d >= 0 && d <= 30;
-        case 'yearly':
-          return local.year == now.year;
-        default:
-          return true;
-      }
+      return _inPeriod(dt.toLocal());
     }).toList();
   }
 
@@ -102,10 +107,17 @@ class _DashboardViewState extends State<DashboardView> {
     }).toList();
     try {
       final report = await app.analyzeEod(todaySales, todayStr);
-      // Cash-basis EOD balance — loan portions aren't cash in the drawer and
-      // are reconciled separately in the Loans section.
-      final totalSales = todaySales.fold<num>(0, (a, s) => a + s.amountPaid);
-      final totalProfit = todaySales.fold<num>(0, (a, s) => a + s.totalProfit);
+      // Cash-basis EOD balance — cash collected today = cash paid on today's
+      // sales PLUS loan repayments received today. Profit is recognized on the
+      // cash portion of sales plus the profit realized from today's repayments.
+      bool sameDayAsNow(DateTime d) =>
+          d.year == now.year && d.month == now.month && d.day == now.day;
+      final coll = app.loanCollections(sameDayAsNow);
+      final totalSales =
+          todaySales.fold<num>(0, (a, s) => a + s.amountPaid) + coll.cash;
+      final totalProfit =
+          todaySales.fold<num>(0, (a, s) => a + app.recognizedSaleProfit(s)) +
+              coll.profit;
       final totalStaked =
           todaySales.fold<num>(0, (a, s) => a + s.totalBuyingPrice);
       final newReport = EndOfDayReport(
@@ -200,11 +212,17 @@ class _DashboardViewState extends State<DashboardView> {
   Widget build(BuildContext context) {
     final app = context.watch<AppState>();
     final filtered = _filtered(app.sales);
-    // Loans are tracked and balanced independently in the Loans section —
-    // only the cash/mobile/card portion actually collected counts here.
-    final revenue = filtered.fold<num>(0, (a, s) => a + s.amountPaid);
+    // Cash-basis: only money actually collected counts. That's the cash paid at
+    // checkout PLUS loan repayments received in this period. Profit is likewise
+    // recognized on the cash portion of each sale, with the credit portion's
+    // profit realized as those loans are repaid.
+    final coll = app.loanCollections(_inPeriod);
+    final revenue =
+        filtered.fold<num>(0, (a, s) => a + s.amountPaid) + coll.cash;
     final staked = filtered.fold<num>(0, (a, s) => a + s.totalBuyingPrice);
-    final profit = filtered.fold<num>(0, (a, s) => a + s.totalProfit);
+    final profit =
+        filtered.fold<num>(0, (a, s) => a + app.recognizedSaleProfit(s)) +
+            coll.profit;
 
     final outOfStock =
         app.products.where((p) => p.currentStock <= 0).toList();
@@ -495,6 +513,7 @@ class _DashboardViewState extends State<DashboardView> {
   }
 
   Widget _trendChart(List<Sale> sales) {
+    final app = context.read<AppState>();
     final sorted = [...sales]..sort((a, b) => a.timestamp.compareTo(b.timestamp));
     final groups = <String, List<num>>{};
     for (final s in sorted) {
@@ -504,7 +523,7 @@ class _DashboardViewState extends State<DashboardView> {
           '${s.timestamp.split('T')[0]} ${dt.hour}:00';
       groups.putIfAbsent(label, () => [0, 0]);
       groups[label]![0] += s.amountPaid;
-      groups[label]![1] += s.totalProfit;
+      groups[label]![1] += app.recognizedSaleProfit(s);
     }
     final entries = groups.entries.toList();
     final tail = entries.length > 10
@@ -665,6 +684,8 @@ class _DashboardViewState extends State<DashboardView> {
   Widget _leaderboard(AppState app, List<Sale> filtered) {
     final counts = <String, Map<String, dynamic>>{};
     for (final s in filtered) {
+      // Cash-basis: only count the profit on the paid fraction of this sale.
+      final paidFrac = s.totalAmount > 0 ? s.amountPaid / s.totalAmount : 1;
       for (final it in s.items) {
         final prod = app.products
             .where((p) => p.id == it.productId)
@@ -682,7 +703,7 @@ class _DashboardViewState extends State<DashboardView> {
                 });
         counts[it.productId]!['quantity'] += it.quantity;
         counts[it.productId]!['revenue'] += it.totalSellingPrice;
-        counts[it.productId]!['profit'] += it.profit;
+        counts[it.productId]!['profit'] += it.profit * paidFrac;
       }
     }
     final list = counts.values.toList()
@@ -741,6 +762,7 @@ class _DashboardViewState extends State<DashboardView> {
   }
 
   Widget _workerLeaderboard(List<Sale> filtered) {
+    final app = context.read<AppState>();
     final counts = <String, Map<String, dynamic>>{};
     for (final s in filtered) {
       counts.putIfAbsent(
@@ -753,7 +775,7 @@ class _DashboardViewState extends State<DashboardView> {
               });
       counts[s.cashierId]!['sales'] += 1;
       counts[s.cashierId]!['revenue'] += s.totalAmount;
-      counts[s.cashierId]!['profit'] += s.totalProfit;
+      counts[s.cashierId]!['profit'] += app.recognizedSaleProfit(s);
     }
     final list = counts.entries.toList()
       ..sort((a, b) =>

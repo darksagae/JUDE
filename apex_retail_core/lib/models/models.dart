@@ -323,6 +323,8 @@ class Loan {
   String createdByName;
   String? saleId; // linked POS sale, if it originated from a checkout
   String? notes;
+  String? settledAt; // ISO timestamp the loan was fully paid off, if settled
+  num? profitRate; // profit fraction of the financed goods (0..1); cash-basis
   List<LoanPayment> payments;
 
   Loan({
@@ -337,6 +339,8 @@ class Loan {
     required this.createdByName,
     this.saleId,
     this.notes,
+    this.settledAt,
+    this.profitRate = 0,
     List<LoanPayment>? payments,
   }) : payments = payments ?? [];
 
@@ -370,6 +374,8 @@ class Loan {
         createdByName: j['createdByName'] as String? ?? '',
         saleId: j['saleId'] as String?,
         notes: j['notes'] as String?,
+        settledAt: j['settledAt'] as String?,
+        profitRate: j['profitRate'] as num? ?? 0,
         payments: ((j['payments'] as List?) ?? [])
             .map((e) => LoanPayment.fromJson(Map<String, dynamic>.from(e as Map)))
             .toList(),
@@ -387,6 +393,13 @@ class Loan {
         'createdByName': createdByName,
         if (saleId != null) 'saleId': saleId,
         if (notes != null) 'notes': notes,
+        if (settledAt != null) 'settledAt': settledAt,
+        'profitRate': profitRate ?? 0,
+        // Explicit, denormalized settlement state so any other system reading
+        // the loans table can see status/balance without recomputing them.
+        'balance': balance,
+        'settled': isSettled,
+        'status': isSettled ? 'settled' : 'active',
         'payments': payments.map((e) => e.toJson()).toList(),
       };
 }

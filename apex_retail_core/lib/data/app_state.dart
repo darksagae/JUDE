@@ -578,28 +578,71 @@ class AppState extends ChangeNotifier {
   }
 
   // ---- staff ----
+  // True while an authoritative staff create/edit/delete is being pushed to
+  // Neon. While set, a concurrent bulk sync must NOT overwrite the local staff
+  // directory (see replaceStaff): the server's staff snapshot may still be
+  // pre-change, and clobbering with it is what made new accounts vanish and
+  // deleted accounts reappear.
+  bool _staffWriteInFlight = false;
+
   void setStaff(List<StaffProfile> s) {
-    final old = staff;
+    final old = List<StaffProfile>.from(staff);
     staff = s;
+    for (final n in s) {
+      _absorbIssuedId(n.userId);
+    }
+    _persistIdState();
     _persistStaff();
     notifyListeners();
     // Propagate the change to the authoritative Neon staff directory (staff is
-    // never carried by the bulk sync). Best-effort; local change stands offline.
+    // never carried by the bulk sync) and adopt the server's response so local
+    // exactly matches the database. Best-effort; local change stands offline.
     _syncStaffDiff(old, s);
   }
 
-  void _syncStaffDiff(List<StaffProfile> before, List<StaffProfile> after) {
-    final afterIds = after.map((e) => e.userId).toSet();
-    for (final o in before) {
-      if (!afterIds.contains(o.userId)) _sync.deleteStaffMember(o.userId);
-    }
-    for (final n in after) {
-      final prev =
-          before.where((e) => e.userId == n.userId).cast<StaffProfile?>().firstOrNull;
-      if (prev == null ||
-          jsonEncode(prev.toJson()) != jsonEncode(n.toJson())) {
-        _sync.saveStaffMember(n);
+  Future<void> _syncStaffDiff(
+      List<StaffProfile> before, List<StaffProfile> after) async {
+    // Offline (or no backend): keep the optimistic local change; it will be
+    // reconciled the next time this device is online and manages staff.
+    if (offlineMode || serverUrl.trim().isEmpty) return;
+
+    _staffWriteInFlight = true;
+    try {
+      final afterIds = after.map((e) => e.userId).toSet();
+      List<StaffProfile>? authoritative;
+
+      // Deletes first, then upserts, awaiting each so the database is the
+      // source of truth before we adopt its answer.
+      for (final o in before) {
+        if (!afterIds.contains(o.userId)) {
+          authoritative = await _sync.deleteStaffMember(o.userId) ?? authoritative;
+        }
       }
+      for (final n in after) {
+        final prev = before
+            .where((e) => e.userId == n.userId)
+            .cast<StaffProfile?>()
+            .firstOrNull;
+        if (prev == null ||
+            jsonEncode(prev.toJson()) != jsonEncode(n.toJson())) {
+          authoritative = await _sync.saveStaffMember(n) ?? authoritative;
+        }
+      }
+
+      // Adopt the server's authoritative directory so a create is confirmed in
+      // the database and a delete truly sticks (no stale bulk-sync pull can
+      // resurrect it). Only when the server actually answered.
+      if (authoritative != null && authoritative.isNotEmpty) {
+        staff = authoritative;
+        for (final n in authoritative) {
+          _absorbIssuedId(n.userId);
+        }
+        _persistIdState();
+        _persistStaff();
+        notifyListeners();
+      }
+    } finally {
+      _staffWriteInFlight = false;
     }
   }
 
@@ -746,11 +789,32 @@ class AppState extends ChangeNotifier {
         'PRODUCT_DELETE',
         'Super Admin ${session.name} deleted "${p.name}" (${p.sku}) '
         'from inventory. Last stock: ${p.currentStock}; category: ${p.category}.');
-    if (!offlineMode) {
-      triggerSync().catchError((_) => SyncResult(false, 0));
-    }
+    // A plain triggerSync would only re-push the (upsert-only) catalog and the
+    // server would keep — then return — the deleted row, resurrecting it. Route
+    // through the authoritative delete endpoint and adopt the server's answer.
+    _deleteProductRemote(productId);
     notifyListeners();
     return true;
+  }
+
+  // True while an authoritative product delete is being pushed to Neon; blocks a
+  // concurrent bulk sync from re-adding the just-deleted product (see
+  // replaceProducts).
+  bool _productWriteInFlight = false;
+
+  Future<void> _deleteProductRemote(String productId) async {
+    if (offlineMode || serverUrl.trim().isEmpty) return;
+    _productWriteInFlight = true;
+    try {
+      final authoritative = await _sync.deleteProduct(productId);
+      if (authoritative != null) {
+        products = authoritative.map((x) => Product.fromJson(x.toJson())).toList();
+        _persistProducts();
+        notifyListeners();
+      }
+    } finally {
+      _productWriteInFlight = false;
+    }
   }
 
   void toggleProductFavorite(String productId) {
@@ -959,6 +1023,8 @@ class AppState extends ChangeNotifier {
         '${loanAmount > 0 ? ' (Cash: shs ${_fmt(amountPaid)}, Loan: shs ${_fmt(loanAmount)})' : ''}');
 
     // If part of the sale is unpaid, register it as a loan against the customer.
+    // Carry the sale's profit margin so that, under cash-basis accounting, the
+    // credit portion's profit is recognized as the loan is repaid (not now).
     if (loanAmount > 0) {
       addLoan(
         customerName: customerName ?? 'Walk-in Customer',
@@ -967,6 +1033,7 @@ class AppState extends ChangeNotifier {
         pledgeDate: resolvedPledgeDate!,
         saleId: sale.id,
         notes: 'Balance from POS sale ${sale.id}',
+        profitRate: totalAmount > 0 ? totalProfit / totalAmount : 0,
         silent: true,
       );
     }
@@ -986,6 +1053,7 @@ class AppState extends ChangeNotifier {
     required String pledgeDate,
     String? saleId,
     String? notes,
+    num profitRate = 0,
     bool silent = false,
   }) {
     final loan = Loan(
@@ -1000,6 +1068,7 @@ class AppState extends ChangeNotifier {
       createdByName: session.name,
       saleId: saleId,
       notes: notes,
+      profitRate: profitRate,
     );
     loans.insert(0, loan);
     _persistLoans();
@@ -1026,9 +1095,19 @@ class AppState extends ChangeNotifier {
           receivedById: session.userId,
           receivedByName: session.name,
         ));
+    // Stamp the settlement time the moment the balance first hits zero, so the
+    // settled state is explicit in the database for any connected system.
+    final justSettled = loan.isSettled && loan.settledAt == null;
+    if (justSettled) {
+      loan.settledAt = DateTime.now().toUtc().toIso8601String();
+    }
     _persistLoans();
     _log('LOAN_PAYMENT',
         'Received shs ${_fmt(applied)} on loan ${loan.id} (${loan.customerName}). Balance: shs ${_fmt(loan.balance)}');
+    if (justSettled) {
+      _log('LOAN_SETTLED',
+          'Loan ${loan.id} (${loan.customerName}) fully settled — total ${_fmt(loan.originalAmount)} paid off.');
+    }
     // Push immediately, same as addSale: without this, a periodic pull-sync
     // landing before the next scheduled push can overwrite this device's
     // local `loans` list (whole-array replace, no merge) and silently lose
@@ -1048,6 +1127,9 @@ class AppState extends ChangeNotifier {
     if (notes != null && notes.trim().isNotEmpty) {
       loan.notes = [if (loan.notes != null) loan.notes!, notes.trim()].join('; ');
     }
+    // Adding credit can re-open a previously settled loan; drop the stale
+    // settlement stamp so the stored status reflects reality.
+    if (!loan.isSettled) loan.settledAt = null;
     _persistLoans();
     _log('LOAN_INCREASE',
         'Added shs ${_fmt(amount)} more credit to loan ${loan.id} (${loan.customerName}). New balance: shs ${_fmt(loan.balance)}');
@@ -1057,14 +1139,57 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  bool _loanWriteInFlight = false;
+
   void deleteLoan(String loanId) {
     loans.removeWhere((l) => l.id == loanId);
     _persistLoans();
     _log('LOAN_DELETE', 'Deleted loan record $loanId');
-    if (!offlineMode) {
-      triggerSync().catchError((_) => SyncResult(false, 0));
-    }
+    // Route through the authoritative delete endpoint: a plain sync would only
+    // merge the (upsert-only) loan list and the server would return the deleted
+    // loan straight back, resurrecting it.
+    _deleteLoanRemote(loanId);
     notifyListeners();
+  }
+
+  Future<void> _deleteLoanRemote(String loanId) async {
+    if (offlineMode || serverUrl.trim().isEmpty) return;
+    _loanWriteInFlight = true;
+    try {
+      final authoritative = await _sync.deleteLoan(loanId);
+      if (authoritative != null) {
+        loans = authoritative;
+        _persistLoans();
+        notifyListeners();
+      }
+    } finally {
+      _loanWriteInFlight = false;
+    }
+  }
+
+  // ---- cash-basis financials ----
+  /// Profit recognized on a sale under cash-basis accounting: proportional to
+  /// the cash actually collected at checkout. The profit on any credit (loan)
+  /// portion is deferred and recognized later, as the loan is repaid (see
+  /// [loanCollections]). For a full-cash sale this equals the whole profit.
+  num recognizedSaleProfit(Sale s) =>
+      s.totalAmount > 0 ? s.totalProfit * (s.amountPaid / s.totalAmount) : s.totalProfit;
+
+  /// Cash collected and profit recognized from loan repayments whose payment
+  /// date satisfies [inRange] (local time). Profit is realized when the money
+  /// is received, so it lands on the payment's own date — not the sale's.
+  ({num cash, num profit}) loanCollections(bool Function(DateTime local) inRange) {
+    num cash = 0;
+    num profit = 0;
+    for (final l in loans) {
+      for (final p in l.payments) {
+        final dt = DateTime.tryParse(p.timestamp)?.toLocal();
+        if (dt == null || !inRange(dt)) continue;
+        cash += p.amount;
+        profit += p.amount * (l.profitRate ?? 0);
+      }
+    }
+    return (cash: cash, profit: profit);
   }
 
   List<Loan> get activeLoans => loans.where((l) => !l.isSettled).toList();
@@ -1099,11 +1224,31 @@ class AppState extends ChangeNotifier {
     return e;
   }
 
+  bool _expenseWriteInFlight = false;
+
   void deleteExpense(String id) {
     expenses.removeWhere((e) => e.id == id);
     _persistExpenses();
     _log('EXPENSE_DELETE', 'Deleted expense $id');
+    // Authoritative delete: without it the next sync's expense list (which the
+    // server only ever appends to) resurrects the deleted expense.
+    _deleteExpenseRemote(id);
     notifyListeners();
+  }
+
+  Future<void> _deleteExpenseRemote(String id) async {
+    if (offlineMode || serverUrl.trim().isEmpty) return;
+    _expenseWriteInFlight = true;
+    try {
+      final authoritative = await _sync.deleteExpense(id);
+      if (authoritative != null) {
+        expenses = authoritative;
+        _persistExpenses();
+        notifyListeners();
+      }
+    } finally {
+      _expenseWriteInFlight = false;
+    }
   }
 
   String _fmt(num n) => n.toStringAsFixed(0).replaceAllMapped(
@@ -1154,6 +1299,10 @@ class AppState extends ChangeNotifier {
 
   // Mutators used by SyncService to overwrite local state with server master.
   void replaceProducts(List<Product> p) {
+    // Guard: a bulk sync's product snapshot must not clobber a delete that is
+    // still being written to Neon — that pre-change snapshot still contains the
+    // deleted product and would resurrect it.
+    if (_productWriteInFlight) return;
     products = p.map((x) => Product.fromJson(x.toJson())).toList();
     _persistProducts();
   }
@@ -1185,6 +1334,9 @@ class AppState extends ChangeNotifier {
   /// amountPaid/originalAmount/payments only ever grow during normal use,
   /// "furthest along" reliably means "most up to date" on either side.
   void replaceLoans(List<Loan> incoming) {
+    // Guard: don't let a bulk sync's loan snapshot resurrect a loan that is
+    // currently being deleted on the server.
+    if (_loanWriteInFlight) return;
     final localById = {for (final l in loans) l.id: l};
     final merged = <Loan>[];
     final seen = <String>{};
@@ -1210,13 +1362,70 @@ class AppState extends ChangeNotifier {
   }
 
   void replaceExpenses(List<Expense> e) {
+    // Guard: don't let a bulk sync's expense snapshot resurrect an expense that
+    // is currently being deleted on the server.
+    if (_expenseWriteInFlight) return;
     expenses = e;
     _persistExpenses();
+  }
+
+  /// Drops any locally-held records the server reports as deleted (tombstoned).
+  /// This is what makes a delete on one device (e.g. a Top Manager voiding a
+  /// loan) propagate to another (e.g. a Manager) — the loan merge in
+  /// [replaceLoans] otherwise keeps it as a "local-only" entry forever.
+  void applyServerDeletions({
+    List<String> sales = const [],
+    List<String> products = const [],
+    List<String> loans = const [],
+    List<String> expenses = const [],
+  }) {
+    var changed = false;
+    if (sales.isNotEmpty) {
+      final ids = sales.toSet();
+      final before = this.sales.length;
+      this.sales.removeWhere((s) => ids.contains(s.id));
+      if (this.sales.length != before) {
+        _persistSales();
+        changed = true;
+      }
+    }
+    if (products.isNotEmpty) {
+      final ids = products.toSet();
+      final before = this.products.length;
+      this.products.removeWhere((p) => ids.contains(p.id));
+      if (this.products.length != before) {
+        _persistProducts();
+        changed = true;
+      }
+    }
+    if (loans.isNotEmpty) {
+      final ids = loans.toSet();
+      final before = this.loans.length;
+      this.loans.removeWhere((l) => ids.contains(l.id));
+      if (this.loans.length != before) {
+        _persistLoans();
+        changed = true;
+      }
+    }
+    if (expenses.isNotEmpty) {
+      final ids = expenses.toSet();
+      final before = this.expenses.length;
+      this.expenses.removeWhere((e) => ids.contains(e.id));
+      if (this.expenses.length != before) {
+        _persistExpenses();
+        changed = true;
+      }
+    }
+    if (changed) notifyListeners();
   }
 
   void replaceStaff(List<StaffProfile> s) {
     // Guard: never let a stray empty server response wipe local logins.
     if (s.isEmpty) return;
+    // Guard: a bulk sync's staff snapshot must not clobber a staff create/edit/
+    // delete that is still being pushed to Neon — that pre-change snapshot is
+    // exactly what made new accounts disappear and deleted ones come back.
+    if (_staffWriteInFlight) return;
     staff = s;
     _persistStaff();
   }

@@ -148,7 +148,159 @@ class _StaffSettingsViewState extends State<StaffSettingsView> {
             ],
           ),
         ),
+        if (role == UserRole.topManager)
+          TextButton.icon(
+            onPressed: () => _editMyAccount(app),
+            style: TextButton.styleFrom(
+                foregroundColor: Colors.white,
+                backgroundColor: Colors.white.withValues(alpha: 0.12),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 10)),
+            icon: const Icon(Icons.manage_accounts, size: 16),
+            label: const Text('My Account', style: TextStyle(fontSize: 11)),
+          ),
       ]),
+    );
+  }
+
+  /// Lets the top manager change their own login name, User ID, and PIN.
+  /// Authorized by re-entering the current PIN. Changing the User ID moves the
+  /// authoritative row in Neon (old id deleted, new id created) via setStaff and
+  /// re-issues the new id so it is never handed to anyone else.
+  void _editMyAccount(AppState app) {
+    final me = app.staff
+        .where((s) => s.userId == app.session.userId)
+        .cast<StaffProfile?>()
+        .firstOrNull;
+    if (me == null) {
+      _snack('Your account record could not be found.', err: true);
+      return;
+    }
+    final name = TextEditingController(text: me.name);
+    final id = TextEditingController(text: me.userId);
+    final currentPin = TextEditingController();
+    final newPin = TextEditingController();
+    final confirmPin = TextEditingController();
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('My Account'),
+        content: ConstrainedBox(
+          constraints:
+              BoxConstraints(maxWidth: Responsive.dialogWidth(ctx, max: 420)),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                    'Update your display name, login ID, or PIN. Re-enter your '
+                    'current PIN to authorize the change.',
+                    style: TextStyle(fontSize: 12, color: AppColors.slate500)),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: name,
+                  decoration: const InputDecoration(labelText: 'Full Name'),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: id,
+                  textCapitalization: TextCapitalization.characters,
+                  decoration: const InputDecoration(
+                      labelText: 'Login User ID',
+                      helperText: 'Used with your PIN to sign in.'),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: currentPin,
+                  obscureText: true,
+                  keyboardType: TextInputType.number,
+                  decoration:
+                      const InputDecoration(labelText: 'Current PIN *'),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: newPin,
+                  obscureText: true,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                      labelText: 'New PIN (leave blank to keep current)'),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: confirmPin,
+                  obscureText: true,
+                  keyboardType: TextInputType.number,
+                  decoration:
+                      const InputDecoration(labelText: 'Confirm New PIN'),
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel')),
+          FilledButton(
+            style:
+                FilledButton.styleFrom(backgroundColor: AppColors.slate900),
+            onPressed: () {
+              final newName = name.text.trim();
+              final newId = id.text.trim().toUpperCase();
+              if (currentPin.text.trim() != me.passcode) {
+                _snack('Incorrect current PIN.', err: true);
+                return;
+              }
+              if (newName.isEmpty) {
+                _snack('Name cannot be empty.', err: true);
+                return;
+              }
+              if (newId.isEmpty) {
+                _snack('Login User ID cannot be empty.', err: true);
+                return;
+              }
+              // Guard against colliding with another existing account's ID.
+              if (newId != me.userId &&
+                  app.staff.any((s) => s.userId == newId)) {
+                _snack('User ID "$newId" is already in use.', err: true);
+                return;
+              }
+              var pass = me.passcode;
+              if (newPin.text.trim().isNotEmpty) {
+                if (newPin.text.trim() != confirmPin.text.trim()) {
+                  _snack('Confirm PIN does not match.', err: true);
+                  return;
+                }
+                pass = newPin.text.trim();
+              }
+              final updatedProfile = StaffProfile(
+                  userId: newId,
+                  name: newName,
+                  role: me.role,
+                  passcode: pass);
+              final updated = app.staff
+                  .map((s) => s.userId == me.userId ? updatedProfile : s)
+                  .toList();
+              app.setStaff(updated);
+              if (newId != me.userId) {
+                app.registerIssuedId(newId);
+              }
+              app.setSession(
+                  UserSession(
+                      userId: newId, name: newName, role: me.role),
+                  logLogin: false);
+              app.logAction(newId, newName, me.role, 'PROFILE_UPDATE',
+                  'Top Manager updated own account (name/ID/PIN). ID ${me.userId} → $newId.');
+              Navigator.pop(ctx);
+              _snack('Your account has been updated.');
+              widget.onSessionChange();
+            },
+            child: const Text('Save Changes'),
+          ),
+        ],
+      ),
     );
   }
 

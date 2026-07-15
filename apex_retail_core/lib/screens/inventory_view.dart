@@ -21,17 +21,21 @@ class _InventoryViewState extends State<InventoryView> {
   String _tab = 'catalog';
   final _search = TextEditingController();
   String _category = 'All';
+  final _catalogScroll = ScrollController();
+  final _ledgerScroll = ScrollController();
 
   @override
   void dispose() {
     _search.dispose();
+    _catalogScroll.dispose();
+    _ledgerScroll.dispose();
     super.dispose();
   }
 
-  void _banner(String msg) {
+  void _banner(String msg, {bool err = false}) {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
       content: Text(msg),
-      backgroundColor: AppColors.emerald,
+      backgroundColor: err ? AppColors.rose : AppColors.emerald,
       behavior: SnackBarBehavior.floating,
     ));
   }
@@ -173,9 +177,16 @@ class _InventoryViewState extends State<InventoryView> {
             ),
           ),
           const SizedBox(height: 16),
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: DataTable(
+          Scrollbar(
+            controller: _catalogScroll,
+            thumbVisibility: true,
+            trackVisibility: true,
+            child: Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: SingleChildScrollView(
+                controller: _catalogScroll,
+                scrollDirection: Axis.horizontal,
+                child: DataTable(
               columnSpacing: 20,
               headingRowHeight: 40,
               dataRowMinHeight: 48,
@@ -191,6 +202,8 @@ class _InventoryViewState extends State<InventoryView> {
                 DataColumn(label: Text('Actions')),
               ],
               rows: filtered.map((p) => _productRow(app, p)).toList(),
+                ),
+              ),
             ),
           ),
           if (filtered.isEmpty)
@@ -297,9 +310,16 @@ class _InventoryViewState extends State<InventoryView> {
               style: TextStyle(
                   fontWeight: FontWeight.w600, color: AppColors.slate800)),
           const SizedBox(height: 12),
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: DataTable(
+          Scrollbar(
+            controller: _ledgerScroll,
+            thumbVisibility: true,
+            trackVisibility: true,
+            child: Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: SingleChildScrollView(
+                controller: _ledgerScroll,
+                scrollDirection: Axis.horizontal,
+                child: DataTable(
               columnSpacing: 20,
               headingRowHeight: 40,
               columns: const [
@@ -343,6 +363,8 @@ class _InventoryViewState extends State<InventoryView> {
                           fontSize: 10, color: AppColors.slate400))),
                 ]);
               }).toList(),
+                ),
+              ),
             ),
           ),
         ],
@@ -537,7 +559,10 @@ class _InventoryViewState extends State<InventoryView> {
                 onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
             FilledButton(
               onPressed: () {
-                if (name.text.trim().isEmpty) return;
+                if (name.text.trim().isEmpty) {
+                  _banner('Commodity name is required.', err: true);
+                  return;
+                }
                 final exp =
                     expiry.text.trim().isEmpty ? null : expiry.text.trim();
                 final buyingVal = num.tryParse(buying.text) ?? 0;
@@ -545,6 +570,27 @@ class _InventoryViewState extends State<InventoryView> {
                     num.tryParse(wholesale.text.trim()) ?? buyingVal;
                 final retailVal =
                     num.tryParse(retail.text.trim()) ?? wholesaleVal;
+                // Price integrity: cost ≤ limit ≤ selling. Blocks saving a
+                // product that could later be sold at or below cost, which is
+                // what corrupts POS profit/revenue figures downstream.
+                if (buyingVal <= 0) {
+                  _banner('Buying cost must be greater than 0.', err: true);
+                  return;
+                }
+                if (wholesaleVal < buyingVal) {
+                  _banner(
+                      'Limit price cannot be below the buying cost '
+                      '(${shs(buyingVal)}).',
+                      err: true);
+                  return;
+                }
+                if (retailVal < wholesaleVal) {
+                  _banner(
+                      'Selling price cannot be below the limit price '
+                      '(${shs(wholesaleVal)}).',
+                      err: true);
+                  return;
+                }
                 final unit =
                     unitLabel.text.trim().isEmpty ? 'piece' : unitLabel.text.trim();
                 final custom = customCategory.text.trim();
@@ -689,9 +735,27 @@ class _InventoryViewState extends State<InventoryView> {
             onPressed: () {
               final w = num.tryParse(wholesale.text);
               final r = num.tryParse(retail.text);
+              final b = num.tryParse(buying.text) ?? p.buyingPrice;
               if (w == null || r == null) return;
+              // Price integrity: cost ≤ limit ≤ selling.
+              if (b <= 0) {
+                _banner('Buying cost must be greater than 0.', err: true);
+                return;
+              }
+              if (w < b) {
+                _banner(
+                    'Limit price cannot be below the buying cost (${shs(b)}).',
+                    err: true);
+                return;
+              }
+              if (r < w) {
+                _banner(
+                    'Selling price cannot be below the limit price (${shs(w)}).',
+                    err: true);
+                return;
+              }
               final upd = p.copy()
-                ..buyingPrice = num.tryParse(buying.text) ?? p.buyingPrice
+                ..buyingPrice = b
                 ..wholesalePrice = w
                 ..retailPrice = r;
               if (upd.sellingPrice < r) upd.sellingPrice = r;

@@ -45,6 +45,17 @@ ThemeData managerTheme() {
     fontFamily: 'Roboto',
   );
   return base.copyWith(
+    // Force strong near-black default text so any un-coloured text on a white
+    // surface (including the worker station's light content area) reads clearly
+    // instead of a muted grey.
+    textTheme: base.textTheme.apply(
+      bodyColor: AppColors.slate900,
+      displayColor: AppColors.slate900,
+    ),
+    colorScheme: base.colorScheme.copyWith(
+      onSurface: AppColors.slate900,
+      onSurfaceVariant: AppColors.slate700,
+    ),
     cardTheme: const CardThemeData(
       elevation: 0,
       color: Colors.white,
