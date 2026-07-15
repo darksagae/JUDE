@@ -8,3 +8,9 @@
 !.env.example
 build/
 .dart_tool/
+
+# React Web App (Apex-Retail-Ledger) ignores
+node_modules/
+dist/
+.vercel/
+server-db.json
