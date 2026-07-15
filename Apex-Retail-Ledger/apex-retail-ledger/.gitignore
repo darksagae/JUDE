@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.vercel/
+.env
+.env.local
+server-db.json
+*.log
+.vercel
+.env*.local
+.claude/

@@ -1,0 +1,6 @@
+{
+  "name": "Apex Retail Ledger",
+  "description": "Professional retail and supermarket finance management ledger featuring real-time POS, thermal receipt printing, offline sync, low stock/expiration notifications, RBAC, and Gemini AI EOD balancing summaries.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

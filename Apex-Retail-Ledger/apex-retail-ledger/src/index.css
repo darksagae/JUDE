@@ -1,0 +1,58 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Outfit", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  
+  --color-brand-primary: #0f172a; /* Slate 900 */
+  --color-brand-secondary: #0284c7; /* Sky 600 */
+  --color-brand-accent: #f59e0b; /* Amber 500 */
+}
+
+@layer utilities {
+  /* Hide scrollbar for Chrome, Safari and Opera */
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  /* Hide scrollbar for IE, Edge and Firefox */
+  .no-scrollbar {
+    -ms-overflow-style: none;  /* IE and Edge */
+    scrollbar-width: none;  /* Firefox */
+  }
+}
+
+/* Styled specifically for Thermal Receipt & Sticker Printing */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  #thermal-print-area, #thermal-print-area *,
+  #sticker-print-area, #sticker-print-area * {
+    visibility: visible;
+  }
+  #thermal-print-area {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 58mm; /* standard POS receipt width */
+    max-width: 100%;
+    margin: 0;
+    padding: 2mm;
+    background: white;
+    color: black;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    line-height: 1.2;
+  }
+  #sticker-print-area {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    background: white;
+    margin: 0;
+    padding: 0;
+  }
+}
