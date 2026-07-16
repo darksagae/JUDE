@@ -20,6 +20,9 @@ export const InventoryView: React.FC<InventoryViewProps> = ({ onRefresh }) => {
   // Dynamic Categories from localDB
   const [dbCategories, setDbCategories] = useState<string[]>(() => localDB.getCategories());
 
+  // Deleting a commodity outright is a top-manager-only privilege.
+  const isTopManager = localDB.getSession().role === 'top_manager';
+
   // Form states for creating/editing product
   const [showProductModal, setShowProductModal] = useState(false);
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
@@ -490,6 +493,21 @@ export const InventoryView: React.FC<InventoryViewProps> = ({ onRefresh }) => {
     });
   };
 
+  // Commodity deletion (Top Manager only). Routed through the authoritative endpoint
+  // so the record is tombstoned — a plain local removal reappears on the next sync.
+  const handleDeleteProduct = async (p: Product) => {
+    if (!isTopManager) return;
+    if (!window.confirm(`Permanently delete "${p.name}" from the catalog? This removes it from the cloud database for every terminal and cannot be undone.`)) {
+      return;
+    }
+    await localDB.deleteProduct(p.id);
+    handleRefresh();
+    setNotificationBanner({
+      type: 'info',
+      message: `🗑️ Deleted commodity "${p.name}". The removal has been pushed to the cloud database.`
+    });
+  };
+
   // Quick price adjustment handlers
   const handleSaveQuickPrice = (e: React.FormEvent) => {
     e.preventDefault();
@@ -726,6 +744,15 @@ export const InventoryView: React.FC<InventoryViewProps> = ({ onRefresh }) => {
                           >
                             <Edit2 size={12} />
                           </button>
+                          {isTopManager && (
+                            <button
+                              onClick={() => handleDeleteProduct(p)}
+                              className="p-1.5 border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-600 rounded-lg transition-colors"
+                              title="Delete Commodity Permanently"
+                            >
+                              <Trash2 size={12} />
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>

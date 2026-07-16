@@ -29,6 +29,10 @@ class SyncService {
       throw Exception('Cannot sync while in Offline Mode');
     }
     final unsynced = app.sales.where((s) => !s.synced).toList();
+    // Snapshot before the payload is built; only these get cleared on success, so
+    // an edit made while the request is in flight stays pending for the next sync.
+    final dirtyProducts = app.dirtyProductIds.toList();
+    final dirtyLoans = app.dirtyLoanIds.toList();
 
     if (!_hasServer) {
       // No backend configured: mark local sales as synced (single-device mode).
@@ -47,6 +51,18 @@ class SyncService {
       'reports': app.reports.map((e) => e.toJson()).toList(),
       'loans': app.loans.map((e) => e.toJson()).toList(),
       'expenses': app.expenses.map((e) => e.toJson()).toList(),
+      // Shared category lists. Previously device-local only, so a category added
+      // here never reached the other terminals.
+      'categories': app.categories,
+      'expenseCategories': app.expenseCategories,
+      // Ids this device actually edited since its last successful sync. Every
+      // device pushes its FULL catalog/loan book, but most of those rows are just
+      // a copy of what it last pulled — letting the server take them as
+      // authoritative meant an idle terminal silently reverted a restock (or wiped
+      // a repayment) made on another machine. Only genuinely-changed rows are
+      // offered as authoritative.
+      'dirtyProductIds': app.dirtyProductIds.toList(),
+      'dirtyLoanIds': app.dirtyLoanIds.toList(),
       // Staff is server-authoritative: never pushed, only pulled (see below and
       // the /api/staff endpoint). This stops a stale local cache from polluting
       // the cloud staff directory.
@@ -110,6 +126,16 @@ class SyncService {
                 StaffProfile.fromJson(Map<String, dynamic>.from(e as Map)))
             .toList());
       }
+      // Category lists are the cloud's union of every device's names.
+      List<String> names(String k) =>
+          ((data[k] as List?) ?? const []).map((e) => '$e').toList();
+      final cats = names('categories');
+      final expCats = names('expenseCategories');
+      if (cats.isNotEmpty || expCats.isNotEmpty) {
+        app.replaceCategories(
+            categories: cats.isNotEmpty ? cats : null,
+            expenseCategories: expCats.isNotEmpty ? expCats : null);
+      }
       // Purge records deleted on another device. Must run AFTER the merges above
       // because replaceLoans keeps local-only loans and would otherwise retain a
       // loan the server has deleted.
@@ -122,10 +148,49 @@ class SyncService {
           products: ids('products'),
           loans: ids('loans'),
           expenses: ids('expenses'),
+          categories: ids('categories'),
+          expenseCategories: ids('expenseCategories'),
         );
       }
+
+      // The server has taken these edits, so this device no longer needs to claim
+      // authority over them.
+      app.clearDirtyAfterSync(dirtyProducts, dirtyLoans);
     }
     return SyncResult(true, unsynced.length);
+  }
+
+  /// Authoritatively adds or removes a category in Neon. Categories are a shared
+  /// list, so the change has to go through its own route rather than ride along
+  /// on the next bulk sync: a delete would otherwise be undone by the next device
+  /// to push its stale list, and a re-added name would stay blocked by its
+  /// tombstone. [kind] is 'product' or 'expense'. Returns the server's
+  /// authoritative lists on success, or null when offline / on failure.
+  Future<({List<String> categories, List<String> expenseCategories})?>
+      pushCategoryChange(String action, String kind, String name) async {
+    if (app.offlineMode || !_hasServer) return null;
+    try {
+      final resp = await http
+          .post(Uri.parse('$_base/api/categories/$action'),
+              headers: {'Content-Type': 'application/json'},
+              body: jsonEncode(
+                  {'name': name, 'kind': kind, 'role': app.session.role.wire}))
+          .timeout(const Duration(seconds: 12));
+      if (resp.statusCode != 200) return null;
+      final data = jsonDecode(resp.body) as Map<String, dynamic>;
+      if (data['success'] == true) {
+        List<String> names(String k) =>
+            ((data[k] as List?) ?? const []).map((e) => '$e').toList();
+        return (
+          categories: names('categories'),
+          expenseCategories: names('expenseCategories'),
+        );
+      }
+    } catch (_) {
+      // offline / unreachable → the local change stands and unions in on the
+      // next successful sync
+    }
+    return null;
   }
 
   /// Pulls the authoritative staff directory from Neon so logins validate
