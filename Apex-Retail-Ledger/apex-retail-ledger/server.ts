@@ -1,7 +1,7 @@
 import express from 'express';
 import { GoogleGenAI, Type } from '@google/genai';
 import dotenv from 'dotenv';
-import { ensureSchema, loadStore, saveStore, deleteRow, tombstone, getDeletedIds } from './db.js';
+import { ensureSchema, loadStore, saveStore, deleteRow, tombstone, untombstone, getDeletedIds, upsertRows } from './db.js';
 
 dotenv.config();
 
@@ -87,6 +87,10 @@ app.post('/api/sync', async (req, res) => {
     loans = [],
     expenses = [],
     staff = [],
+    categories = [],
+    expenseCategories = [],
+    dirtyProductIds,
+    dirtyLoanIds,
     role,
     hasLocalEdits = false,
   } = req.body;
@@ -121,11 +125,15 @@ app.post('/api/sync', async (req, res) => {
       deletedProducts,
       deletedLoans,
       deletedExpenses,
+      deletedCategories,
+      deletedExpenseCategories,
     ] = await Promise.all([
       getDeletedIds('sales'),
       getDeletedIds('products'),
       getDeletedIds('loans'),
       getDeletedIds('expenses'),
+      getDeletedIds('categories'),
+      getDeletedIds('expenseCategories'),
     ]);
 
     // A. Merge incoming sales and deduct stock for sales the server hasn't seen.
@@ -149,26 +157,60 @@ app.post('/api/sync', async (req, res) => {
     // has been deleted (tombstoned) is never re-added, even if a stale device
     // still has it in its pushed catalog.
     const pushableProducts = cleanProducts.filter((p: any) => !deletedProducts.has(p?.id));
+    // Ids whose stock level this request has taken from the client verbatim. The
+    // client already folded its restocks and adjustments into the currentStock it
+    // pushed, so step C must not add those quantities on again (that double-counted
+    // every restock: 100 + a 10 restock landed at 120).
+    const authoritativeStockIds = new Set<string>();
+    // Ids this device actually edited since its last successful sync. Every device
+    // pushes its FULL catalog, but most of those rows are just a copy of what it
+    // last pulled — taking them as authoritative let an idle terminal silently
+    // revert a restock made on another machine (last writer wins).
+    //
+    // A client that does not send this list gets NO authority over rows the cloud
+    // already knows. It used to get whole-catalog authority for backwards compat,
+    // and that was actively destroying inventory: a stale client (an old APK, or a
+    // browser tab holding a cached bundle) re-pushed its old catalog every poll and
+    // reverted every edit made anywhere else within seconds. Because it then
+    // adopted its own value back from the response, it never self-corrected — it
+    // just kept winning. carrot seeds lost 250 units this way on 2026-07-15.
+    //
+    // Failing closed is safe: such a client can still create products the cloud has
+    // never seen, its sales still merge, and its restocks still land through the
+    // stock-transaction ledger in step C (which applies quantities for exactly the
+    // products this request did not claim authority over).
+    const dirtySet: Set<string> | null = Array.isArray(dirtyProductIds)
+      ? new Set((dirtyProductIds as any[]).map(String))
+      : null;
     if (pushableProducts.length > 0 && (role === 'manager' || role === 'top_manager' || hasLocalEdits)) {
       pushableProducts.forEach((clientProd: any) => {
         const sIdx = store.products.findIndex(p => p.id === clientProd.id);
-        if (sIdx !== -1) {
-          store.products[sIdx] = { ...store.products[sIdx], ...clientProd };
-        } else {
+        if (sIdx === -1) {
+          // The cloud has never seen this product — always take it, so a catalog
+          // that predates cloud sync still backfills.
           store.products.push(clientProd);
+          authoritativeStockIds.add(clientProd.id);
+        } else if (dirtySet && dirtySet.has(String(clientProd.id))) {
+          store.products[sIdx] = { ...store.products[sIdx], ...clientProd };
+          authoritativeStockIds.add(clientProd.id);
         }
+        // Otherwise: known to the cloud and not declared as changed here — leave
+        // the cloud's copy alone and let this device adopt it from the response.
       });
     } else if (store.products.length === 0 && pushableProducts.length > 0) {
       // First device to bring a catalog online seeds the empty server catalog.
       store.products.push(...pushableProducts);
+      pushableProducts.forEach((p: any) => authoritativeStockIds.add(p.id));
     }
 
-    // C. Append stock transactions (and apply adjustments for non-sale reasons).
+    // C. Append stock transactions. The quantity is only applied for products this
+    // request did NOT carry an authoritative stock level for — otherwise the tx is
+    // recorded for the ledger only, since the pushed product already reflects it.
     cleanStockTx.forEach((incomingTx: any) => {
       const exists = store.stockTransactions.some(t => t.id === incomingTx.id);
       if (!exists) {
         store.stockTransactions.push(incomingTx);
-        if (incomingTx.reason !== 'sale') {
+        if (incomingTx.reason !== 'sale' && !authoritativeStockIds.has(incomingTx.productId)) {
           const prod = store.products.find(p => p.id === incomingTx.productId);
           if (prod) {
             prod.currentStock = Math.max(0, prod.currentStock + incomingTx.quantity);
@@ -193,11 +235,22 @@ app.post('/api/sync', async (req, res) => {
 
     // F. Merge loans (upsert by id — balances/payments change over time).
     // Skip any loan that has been deleted so a stale device can't resurrect it.
+    // Only loans this device actually changed are authoritative — same reasoning
+    // as products above, and a client that declares nothing gets no authority over
+    // loans the cloud already knows. An idle terminal pushing its pre-payment copy
+    // of a loan would otherwise wipe out a repayment recorded on another machine —
+    // money the business is owed, silently forgiven.
+    const dirtyLoanSet: Set<string> | null = Array.isArray(dirtyLoanIds)
+      ? new Set((dirtyLoanIds as any[]).map(String))
+      : null;
     loans.forEach((incomingLoan: any) => {
       if (deletedLoans.has(incomingLoan.id)) return;
       const idx = store.loans.findIndex(l => l.id === incomingLoan.id);
-      if (idx !== -1) store.loans[idx] = incomingLoan;
-      else store.loans.push(incomingLoan);
+      if (idx === -1) {
+        store.loans.push(incomingLoan);
+      } else if (dirtyLoanSet && dirtyLoanSet.has(String(incomingLoan.id))) {
+        store.loans[idx] = incomingLoan;
+      }
     });
 
     // G. Merge expenses (append by id). Skip tombstoned expenses.
@@ -207,6 +260,28 @@ app.post('/api/sync', async (req, res) => {
         store.expenses.push(incomingExp);
       }
     });
+
+    // G2. Merge category lists (union). Categories are a shared, user-managed set
+    // rather than records with ids, so every device contributes the names it knows
+    // and the cloud holds the union. A name that was explicitly deleted is
+    // tombstoned and skipped, otherwise the next device to sync its stale list
+    // would resurrect it. Re-adding a deleted name goes through
+    // /api/categories/add, which clears the tombstone first.
+    const mergeNames = (incoming: any[], current: string[], deleted: Set<string>) => {
+      const merged = [...current];
+      (incoming as any[]).forEach((raw) => {
+        const name = typeof raw === 'string' ? raw.trim() : '';
+        if (!name || deleted.has(name) || merged.includes(name)) return;
+        merged.push(name);
+      });
+      return merged;
+    };
+    store.categories = mergeNames(categories, store.categories, deletedCategories);
+    store.expenseCategories = mergeNames(
+      expenseCategories,
+      store.expenseCategories,
+      deletedExpenseCategories
+    );
 
     // H. Staff is STRICTLY server-authoritative — the sync endpoint ignores any
     // staff a client sends (`staff` in the payload is intentionally unused). This
@@ -231,6 +306,8 @@ app.post('/api/sync', async (req, res) => {
       loans: store.loans,
       expenses: store.expenses,
       staff: store.staff,
+      categories: store.categories,
+      expenseCategories: store.expenseCategories,
       // Tombstoned ids so clients can drop deleted records their local merge
       // would otherwise keep (loans merge preserves local-only entries, so a
       // delete on another device wouldn't propagate without this).
@@ -239,6 +316,8 @@ app.post('/api/sync', async (req, res) => {
         products: [...deletedProducts],
         loans: [...deletedLoans],
         expenses: [...deletedExpenses],
+        categories: [...deletedCategories],
+        expenseCategories: [...deletedExpenseCategories],
       },
     });
   } catch (error) {
@@ -341,6 +420,65 @@ app.post('/api/expenses/delete', async (req, res) => {
     await tombstone('expenses', expenseId);
     const store = await loadStore();
     res.json({ success: true, expenses: store.expenses });
+  } catch (error) {
+    res.status(500).json({ success: false, message: (error as Error).message });
+  }
+});
+
+// 2.4 Category routes. Categories are a shared list, so an add/delete has to be
+// authoritative rather than ride along on the next bulk sync — otherwise the
+// change is invisible to every other terminal. `kind` picks the product catalog
+// list or the expenditure list.
+const categoryTarget = (kind: any) =>
+  kind === 'expense'
+    ? { table: 'expense_categories' as const, collection: 'expenseCategories' }
+    : { table: 'categories' as const, collection: 'categories' };
+
+app.post('/api/categories/add', async (req, res) => {
+  const { name, kind, role } = req.body;
+  if (role !== 'manager' && role !== 'top_manager') {
+    return res.status(403).json({ success: false, message: 'Only managers can add categories.' });
+  }
+  const clean = typeof name === 'string' ? name.trim() : '';
+  if (!clean) {
+    return res.status(400).json({ success: false, message: 'A category name is required.' });
+  }
+  try {
+    const { table, collection } = categoryTarget(kind);
+    // Clear any tombstone first, so a category that was deleted earlier can be
+    // deliberately brought back. Without this the add would be silently ignored.
+    await untombstone(collection, clean);
+    await upsertRows(table, [{ name: clean }], 'name');
+    const store = await loadStore();
+    res.json({
+      success: true,
+      categories: store.categories,
+      expenseCategories: store.expenseCategories,
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: (error as Error).message });
+  }
+});
+
+app.post('/api/categories/delete', async (req, res) => {
+  const { name, kind, role } = req.body;
+  if (role !== 'manager' && role !== 'top_manager') {
+    return res.status(403).json({ success: false, message: 'Only managers can delete categories.' });
+  }
+  const clean = typeof name === 'string' ? name.trim() : '';
+  if (!clean) {
+    return res.status(400).json({ success: false, message: 'A category name is required.' });
+  }
+  try {
+    const { table, collection } = categoryTarget(kind);
+    await deleteRow(table, clean);
+    await tombstone(collection, clean);
+    const store = await loadStore();
+    res.json({
+      success: true,
+      categories: store.categories,
+      expenseCategories: store.expenseCategories,
+    });
   } catch (error) {
     res.status(500).json({ success: false, message: (error as Error).message });
   }

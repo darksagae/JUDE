@@ -32,7 +32,6 @@ interface StaffSettingsViewProps {
 export const StaffSettingsView: React.FC<StaffSettingsViewProps> = ({ onSessionChange }) => {
   const [currentSession, setCurrentSession] = useState<UserSession>(() => localDB.getSession());
   const [staff, setStaff] = useState<any[]>(() => localDB.getStaffProfiles());
-  const [expiredControl, setExpiredControl] = useState<'restrict' | 'allow'>(() => localDB.getExpiredSalesControl());
 
   // Create Staff Form States
   const [newName, setNewName] = useState('');
@@ -45,7 +44,9 @@ export const StaffSettingsView: React.FC<StaffSettingsViewProps> = ({ onSessionC
   // Password / PIN Visibility
   const [visiblePasscodes, setVisiblePasscodes] = useState<Record<string, boolean>>({});
 
-  // Worker password change states
+  // Self-service account edit states ("My Account" — every role, including top manager)
+  const [selfName, setSelfName] = useState(() => localDB.getSession().name);
+  const [selfId, setSelfId] = useState(() => localDB.getSession().userId);
   const [workerCurrentPass, setWorkerCurrentPass] = useState('');
   const [workerNewPass, setWorkerNewPass] = useState('');
   const [workerConfirmPass, setWorkerConfirmPass] = useState('');
@@ -202,68 +203,87 @@ export const StaffSettingsView: React.FC<StaffSettingsViewProps> = ({ onSessionC
     }
   };
 
-  // Worker self password update
-  const handleWorkerChangePassword = (e: React.FormEvent) => {
+  // Self-service account update — any role edits their own name, ID and PIN.
+  // The current PIN must be re-entered so a walk-up on an unlocked terminal cannot
+  // silently take the account over. A blank new PIN simply leaves the PIN unchanged.
+  const handleUpdateMyAccount = (e: React.FormEvent) => {
     e.preventDefault();
     setWorkerPassSuccess('');
     setWorkerPassError('');
 
     const currentProfile = staff.find(s => s.userId === currentSession.userId);
-    if (!currentProfile) return;
+    if (!currentProfile) {
+      setWorkerPassError('Your profile could not be found in the staff directory.');
+      return;
+    }
 
     if (workerCurrentPass !== currentProfile.passcode) {
       setWorkerPassError('Incorrect current passcode.');
       return;
     }
 
-    if (!workerNewPass.trim()) {
-      setWorkerPassError('New passcode cannot be empty.');
+    const cleanName = selfName.trim();
+    const cleanId = selfId.trim().toUpperCase();
+
+    if (!cleanName) {
+      setWorkerPassError('Your name cannot be empty.');
+      return;
+    }
+    if (!cleanId) {
+      setWorkerPassError('Your staff ID cannot be empty.');
+      return;
+    }
+    if (cleanId !== currentSession.userId && staff.some(s => s.userId === cleanId)) {
+      setWorkerPassError(`Staff ID ${cleanId} is already taken by another account.`);
       return;
     }
 
-    if (workerNewPass !== workerConfirmPass) {
+    const wantsNewPass = workerNewPass.trim().length > 0;
+    if (wantsNewPass && workerNewPass !== workerConfirmPass) {
       setWorkerPassError('Confirm passcode does not match.');
       return;
     }
 
-    const updatedStaff = staff.map(s => {
-      if (s.userId === currentSession.userId) {
-        return { ...s, passcode: workerNewPass.trim() };
-      }
-      return s;
-    });
+    const updatedStaff = staff.map(s =>
+      s.userId === currentSession.userId
+        ? {
+            ...s,
+            userId: cleanId,
+            name: cleanName,
+            passcode: wantsNewPass ? workerNewPass.trim() : s.passcode
+          }
+        : s
+    );
 
     localDB.setStaffProfiles(updatedStaff);
     setStaff(updatedStaff);
 
+    const changes = [
+      cleanName !== currentSession.name ? 'name' : null,
+      cleanId !== currentSession.userId ? 'staff ID' : null,
+      wantsNewPass ? 'passcode' : null
+    ].filter(Boolean);
+
     localDB.logAction(
       currentSession.userId,
       currentSession.name,
       currentSession.role,
-      'PASSWORD_CHANGE',
-      `Worker changed their password securely`
+      'PROFILE_UPDATE',
+      changes.length
+        ? `Updated own ${changes.join(', ')}${cleanId !== currentSession.userId ? ` (now ${cleanId})` : ''}`
+        : 'Re-saved own profile with no changes'
     );
 
-    setWorkerPassSuccess('Your shift password has been updated!');
+    // Carry the session over so the header, audit trail and future sales use the new identity.
+    const nextSession: UserSession = { userId: cleanId, name: cleanName, role: currentSession.role };
+    localDB.setSession(nextSession);
+    setCurrentSession(nextSession);
+    onSessionChange(nextSession);
+
+    setWorkerPassSuccess(changes.length ? 'Your account details have been updated.' : 'No changes to save.');
     setWorkerCurrentPass('');
     setWorkerNewPass('');
     setWorkerConfirmPass('');
-  };
-
-  // Expired commodity restriction toggle
-  const handleToggleExpiredControl = (control: 'restrict' | 'allow') => {
-    if (isWorker) return; // workers can't set system controls
-    
-    localDB.setExpiredSalesControl(control);
-    setExpiredControl(control);
-
-    localDB.logAction(
-      currentSession.userId,
-      currentSession.name,
-      currentSession.role,
-      'EXPIRED_CONTROL_SET',
-      `System configuration updated: sales of expired commodities set to ${control.toUpperCase()}`
-    );
   };
 
   // Save printer settings
@@ -564,65 +584,13 @@ export const StaffSettingsView: React.FC<StaffSettingsViewProps> = ({ onSessionC
           </div>
         )}
 
-        {/* Low Stock & Expiration Rules Settings */}
+        {/* My Account — self-service profile edit for every role, top manager included */}
         <div className="bg-white border border-slate-100 rounded-2xl p-6 shadow-sm space-y-4">
-          <div className="flex items-center gap-2 text-slate-900">
-            <Sliders size={16} className="text-slate-400" />
-            <h4 className="font-display font-bold text-xs uppercase tracking-wide">Commodities Expiration Control</h4>
-          </div>
-
-          <p className="text-[11px] text-slate-400 leading-normal font-sans">
-            Warnings and low inventory alerts display on all panels. Configure strict sales restriction policy:
-          </p>
-
-          <div className="bg-slate-50 border border-slate-100 rounded-xl p-3 space-y-3">
-            <div className="flex gap-2">
-              <button
-                disabled={isWorker}
-                onClick={() => handleToggleExpiredControl('restrict')}
-                className={`flex-1 py-2 rounded-lg text-[10px] font-bold uppercase transition-all flex items-center justify-center gap-1 ${
-                  expiredControl === 'restrict'
-                    ? 'bg-rose-600 text-white shadow-sm'
-                    : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100 disabled:opacity-50'
-                }`}
-              >
-                <Lock size={10} /> Restrict Expired
-              </button>
-              <button
-                disabled={isWorker}
-                onClick={() => handleToggleExpiredControl('allow')}
-                className={`flex-1 py-2 rounded-lg text-[10px] font-bold uppercase transition-all flex items-center justify-center gap-1 ${
-                  expiredControl === 'allow'
-                    ? 'bg-emerald-600 text-white shadow-sm'
-                    : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100 disabled:opacity-50'
-                }`}
-              >
-                <Unlock size={10} /> Allow & Warn
-              </button>
-            </div>
-
-            <div className="text-[10px] text-slate-500 leading-relaxed font-sans bg-white p-2 border border-slate-150/50 rounded-lg">
-              {expiredControl === 'restrict' ? (
-                <span className="text-rose-600 font-medium">
-                  🔒 <b>Active Policy</b>: Checkout is blocked entirely if standard cashiers try to scan/sell commodities that have passed their expiration date.
-                </span>
-              ) : (
-                <span className="text-emerald-600 font-medium">
-                  🔓 <b>Active Policy</b>: Checkout triggers red alerts but permits cashiers to complete sales of near-expired or expired commodities.
-                </span>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* Change password for standard workers */}
-        {isWorker && (
-          <div className="bg-white border border-slate-100 rounded-2xl p-6 shadow-sm space-y-4">
             <div className="flex items-center gap-2">
-              <Key size={16} className="text-emerald-500" />
+              <Key size={16} className={isTopManager ? 'text-amber-500' : 'text-emerald-500'} />
               <div>
-                <h4 className="font-display font-bold text-slate-950 text-xs uppercase tracking-wide">Change My PIN</h4>
-                <p className="text-[10px] text-slate-400 mt-0.5">Worker can change passcode. Supervisors can oversee.</p>
+                <h4 className="font-display font-bold text-slate-950 text-xs uppercase tracking-wide">My Account</h4>
+                <p className="text-[10px] text-slate-400 mt-0.5">Change your own name, staff ID and PIN.</p>
               </div>
             </div>
 
@@ -640,15 +608,43 @@ export const StaffSettingsView: React.FC<StaffSettingsViewProps> = ({ onSessionC
               </div>
             )}
 
-            <form onSubmit={handleWorkerChangePassword} className="space-y-3.5">
+            <form onSubmit={handleUpdateMyAccount} className="space-y-3.5">
               <div>
                 <label className="block text-[9px] font-display font-bold text-slate-400 uppercase tracking-wider mb-1">
-                  Current PIN Code
+                  My Full Name
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. Jude Mukasa"
+                  value={selfName}
+                  onChange={(e) => setSelfName(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 text-slate-800 font-medium"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[9px] font-display font-bold text-slate-400 uppercase tracking-wider mb-1">
+                  My Staff ID / Username
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. TM001"
+                  value={selfId}
+                  onChange={(e) => setSelfId(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-mono uppercase focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 text-slate-800"
+                />
+              </div>
+
+              <div className="border-t border-slate-100 pt-3.5">
+                <label className="block text-[9px] font-display font-bold text-slate-400 uppercase tracking-wider mb-1">
+                  Current PIN Code *
                 </label>
                 <input
                   type="password"
                   required
-                  placeholder="e.g. 0000"
+                  placeholder="Confirm it is you"
                   value={workerCurrentPass}
                   onChange={(e) => setWorkerCurrentPass(e.target.value)}
                   className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 text-slate-800"
@@ -661,10 +657,9 @@ export const StaffSettingsView: React.FC<StaffSettingsViewProps> = ({ onSessionC
                 </label>
                 <input
                   type="password"
-                  required
-                  placeholder="e.g. 4321"
+                  placeholder="Leave blank to keep current PIN"
                   value={workerNewPass}
-                  onChange={(e) => setNewPasscode(e.target.value)}
+                  onChange={(e) => setWorkerNewPass(e.target.value)}
                   className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 text-slate-800"
                 />
               </div>
@@ -675,8 +670,7 @@ export const StaffSettingsView: React.FC<StaffSettingsViewProps> = ({ onSessionC
                 </label>
                 <input
                   type="password"
-                  required
-                  placeholder="Confirm 4321"
+                  placeholder="Repeat the new PIN"
                   value={workerConfirmPass}
                   onChange={(e) => setWorkerConfirmPass(e.target.value)}
                   className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 text-slate-800"
@@ -687,11 +681,10 @@ export const StaffSettingsView: React.FC<StaffSettingsViewProps> = ({ onSessionC
                 type="submit"
                 className="w-full bg-slate-900 hover:bg-slate-800 text-white font-display font-bold text-xs uppercase tracking-wider py-2.5 rounded-xl shadow-sm transition-all"
               >
-                Change PIN Code
+                Save My Account
               </button>
             </form>
           </div>
-        )}
 
         {/* Register Staff Panel - Visible to managers and top managers */}
         {!isWorker && (

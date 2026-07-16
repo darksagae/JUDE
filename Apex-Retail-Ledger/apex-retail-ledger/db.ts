@@ -34,6 +34,12 @@ export const TABLES = [
   'loans',
   'expenses',
   'staff',
+  // Category lists are user-managed and shared across every terminal. They were
+  // previously device-local only (localStorage / SharedPreferences), so a
+  // category added on one device never reached the others. Stored as one row per
+  // category, keyed by the name itself.
+  'categories',
+  'expense_categories',
 ] as const;
 
 export type TableName = (typeof TABLES)[number];
@@ -52,6 +58,8 @@ export const COLLECTIONS: Record<
   loans: { table: 'loans', idKey: 'id' },
   expenses: { table: 'expenses', idKey: 'id' },
   staff: { table: 'staff', idKey: 'userId' },
+  categories: { table: 'categories', idKey: 'name' },
+  expenseCategories: { table: 'expense_categories', idKey: 'name' },
 };
 
 let schemaReady: Promise<void> | null = null;
@@ -146,6 +154,8 @@ export async function loadStore() {
     loans,
     expenses,
     staff,
+    categoryRows,
+    expenseCategoryRows,
   ] = await Promise.all([
     getAll('products'),
     getAll('sales'),
@@ -155,7 +165,12 @@ export async function loadStore() {
     getAll('loans'),
     getAll('expenses'),
     getAll('staff'),
+    getAll('categories'),
+    getAll('expense_categories'),
   ]);
+  // Categories travel the wire as plain strings; they are stored as {name} rows.
+  const toNames = (rows: any[]): string[] =>
+    rows.map((r) => r?.name).filter((n): n is string => typeof n === 'string' && n !== '');
   return {
     products,
     sales,
@@ -165,6 +180,8 @@ export async function loadStore() {
     loans,
     expenses,
     staff,
+    categories: toNames(categoryRows),
+    expenseCategories: toNames(expenseCategoryRows),
   };
 }
 
@@ -200,7 +217,10 @@ export async function saveStore(store: {
   loans?: any[];
   expenses?: any[];
   staff?: any[];
+  categories?: string[];
+  expenseCategories?: string[];
 }): Promise<void> {
+  const toRows = (names: string[] = []) => names.map((name) => ({ name }));
   await Promise.all([
     upsertRows('products', store.products ?? [], 'id'),
     upsertRows('sales', store.sales ?? [], 'id'),
@@ -210,5 +230,16 @@ export async function saveStore(store: {
     upsertRows('loans', store.loans ?? [], 'id'),
     upsertRows('expenses', store.expenses ?? [], 'id'),
     upsertRows('staff', store.staff ?? [], 'userId'),
+    upsertRows('categories', toRows(store.categories), 'name'),
+    upsertRows('expense_categories', toRows(store.expenseCategories), 'name'),
+  ]);
+}
+
+/** Clears a tombstone so an explicitly re-added record can exist again. */
+export async function untombstone(collection: string, id: string): Promise<void> {
+  if (!id) return;
+  await sql.query(`DELETE FROM deletions WHERE collection = $1 AND id = $2`, [
+    collection,
+    String(id),
   ]);
 }

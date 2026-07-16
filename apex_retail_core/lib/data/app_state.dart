@@ -25,6 +25,8 @@ class AppState extends ChangeNotifier {
   static const _kExpiredControl = 'sm_expired_control';
   static const _kCategories = 'sm_categories';
   static const _kExpenseCategories = 'sm_expense_categories';
+  static const _kDirtyProducts = 'sm_dirty_products';
+  static const _kDirtyLoans = 'sm_dirty_loans';
   static const _kPrinterSettings = 'sm_printer_settings';
   static const _kServerUrl = 'sm_server_url';
   static const _kLoans = 'sm_loans';
@@ -53,6 +55,14 @@ class AppState extends ChangeNotifier {
   List<StaffProfile> staff = [];
   List<String> categories = [];
   List<String> expenseCategories = [];
+
+  /// Ids of products/loans this device has actually edited since its last
+  /// successful sync. Sync pushes the whole catalog and loan book, but only these
+  /// are offered to the server as authoritative — otherwise this device's stale
+  /// copy of an untouched record would overwrite a restock or a repayment made on
+  /// another terminal. Persisted so an offline edit survives a restart.
+  Set<String> dirtyProductIds = {};
+  Set<String> dirtyLoanIds = {};
   List<Loan> loans = [];
   List<Expense> expenses = [];
   late UserSession session;
@@ -87,6 +97,8 @@ class AppState extends ChangeNotifier {
     _migrateLegacyCategories();
     expenseCategories = _readStringList(
         _kExpenseCategories, () => List.of(initialExpenseCategories));
+    dirtyProductIds = _readStringList(_kDirtyProducts, () => <String>[]).toSet();
+    dirtyLoanIds = _readStringList(_kDirtyLoans, () => <String>[]).toSet();
     loans = _readList(_kLoans, Loan.fromJson, () => []);
     expenses = _readList(_kExpenses, Expense.fromJson, () => []);
     _purgeLegacyDemoData();
@@ -252,6 +264,63 @@ class AppState extends ChangeNotifier {
   void _persistCategories() => _prefs.setString(_kCategories, jsonEncode(categories));
   void _persistExpenseCategories() =>
       _prefs.setString(_kExpenseCategories, jsonEncode(expenseCategories));
+  void _persistDirtyProducts() =>
+      _prefs.setString(_kDirtyProducts, jsonEncode(dirtyProductIds.toList()));
+  void _persistDirtyLoans() =>
+      _prefs.setString(_kDirtyLoans, jsonEncode(dirtyLoanIds.toList()));
+
+  /// Flags a product as locally edited so the next sync claims authority over it.
+  void markProductDirty(String id) {
+    if (id.isEmpty || !dirtyProductIds.add(id)) return;
+    _persistDirtyProducts();
+  }
+
+  /// Flags a loan as locally edited so the next sync claims authority over it.
+  void markLoanDirty(String id) {
+    if (id.isEmpty || !dirtyLoanIds.add(id)) return;
+    _persistDirtyLoans();
+  }
+
+  /// Called once the server has accepted these edits. Only the ids that were in
+  /// the pushed payload are cleared, so anything edited while the request was in
+  /// flight stays pending for the next sync.
+  void clearDirtyAfterSync(List<String> products, List<String> loans) {
+    if (products.isNotEmpty) {
+      final done = products.toSet();
+      dirtyProductIds.removeWhere((id) => done.contains(id));
+      _persistDirtyProducts();
+    }
+    if (loans.isNotEmpty) {
+      final done = loans.toSet();
+      dirtyLoanIds.removeWhere((id) => done.contains(id));
+      _persistDirtyLoans();
+    }
+  }
+
+  /// Adopts the cloud's union of category names.
+  void replaceCategories({List<String>? categories, List<String>? expenseCategories}) {
+    var changed = false;
+    if (categories != null && !_sameList(this.categories, categories)) {
+      this.categories = List.of(categories);
+      _persistCategories();
+      changed = true;
+    }
+    if (expenseCategories != null &&
+        !_sameList(this.expenseCategories, expenseCategories)) {
+      this.expenseCategories = List.of(expenseCategories);
+      _persistExpenseCategories();
+      changed = true;
+    }
+    if (changed) notifyListeners();
+  }
+
+  bool _sameList(List<String> a, List<String> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
   void _persistLoans() => _save(_kLoans, loans);
   void _persistExpenses() => _save(_kExpenses, expenses);
 
@@ -391,12 +460,28 @@ class AppState extends ChangeNotifier {
   void toggleSidebar() => setSidebarCollapsed(!sidebarCollapsed);
 
   // ---- categories ----
+
+  /// Sends a category add/delete to its own authoritative endpoint and adopts the
+  /// server's lists. Fire-and-forget: offline, the local change stands and unions
+  /// in on the next successful sync.
+  Future<void> _pushCategoryChange(String action, String kind, String name) async {
+    if (offlineMode || serverUrl.trim().isEmpty) return;
+    final res = await _sync.pushCategoryChange(action, kind, name);
+    if (res == null) return;
+    replaceCategories(
+      categories: res.categories.isNotEmpty ? res.categories : null,
+      expenseCategories:
+          res.expenseCategories.isNotEmpty ? res.expenseCategories : null,
+    );
+  }
+
   bool addCategory(String category) {
     final n = category.trim();
     if (n.isNotEmpty && !categories.contains(n)) {
       categories.add(n);
       _persistCategories();
       _log('CATEGORY_CREATE', '${session.name} created category: $n');
+      _pushCategoryChange('add', 'product', n);
       notifyListeners();
       return true;
     }
@@ -416,9 +501,17 @@ class AppState extends ChangeNotifier {
         }
       }
       _persistCategories();
-      if (updated > 0) _persistProducts();
+      if (updated > 0) {
+        _persistProducts();
+        for (final p in products) {
+          if (p.category == n) markProductDirty(p.id);
+        }
+      }
       _log('CATEGORY_UPDATE',
           'Edited category $oldName -> $n. Re-assigned $updated products.');
+      // A rename is an add of the new name plus a delete of the old one.
+      _pushCategoryChange('add', 'product', n);
+      _pushCategoryChange('delete', 'product', oldName);
       notifyListeners();
       return true;
     }
@@ -439,9 +532,15 @@ class AppState extends ChangeNotifier {
         }
       }
       _persistCategories();
-      if (updated > 0) _persistProducts();
+      if (updated > 0) {
+        _persistProducts();
+        for (final p in products) {
+          if (p.category == fb) markProductDirty(p.id);
+        }
+      }
       _log('CATEGORY_DELETE',
           'Deleted category $category. Re-assigned $updated products to $fb.');
+      _pushCategoryChange('delete', 'product', category);
       notifyListeners();
       return true;
     }
@@ -455,6 +554,7 @@ class AppState extends ChangeNotifier {
       expenseCategories.add(n);
       _persistExpenseCategories();
       _log('EXPENSE_CATEGORY_CREATE', '${session.name} created expense category: $n');
+      _pushCategoryChange('add', 'expense', n);
       notifyListeners();
       return true;
     }
@@ -477,6 +577,9 @@ class AppState extends ChangeNotifier {
       if (updated > 0) _persistExpenses();
       _log('EXPENSE_CATEGORY_UPDATE',
           'Edited expense category $oldName -> $n. Re-assigned $updated expenses.');
+      // A rename is an add of the new name plus a delete of the old one.
+      _pushCategoryChange('add', 'expense', n);
+      _pushCategoryChange('delete', 'expense', oldName);
       notifyListeners();
       return true;
     }
@@ -501,6 +604,7 @@ class AppState extends ChangeNotifier {
       if (updated > 0) _persistExpenses();
       _log('EXPENSE_CATEGORY_DELETE',
           'Deleted expense category $category. Re-assigned $updated expenses to $fb.');
+      _pushCategoryChange('delete', 'expense', category);
       notifyListeners();
       return true;
     }
@@ -678,8 +782,6 @@ class AppState extends ChangeNotifier {
     num? wholesalePrice,
     num? retailPrice,
     String unitLabel = 'piece',
-    String? packageLabel,
-    num unitsPerPackage = 1,
     required num currentStock,
     required num minStockLevel,
     String saleType = 'retail',
@@ -688,11 +790,10 @@ class AppState extends ChangeNotifier {
     var finalSku = sku.trim();
     if (finalSku.isEmpty) finalSku = _autoSku(category, name);
     final wholesale = wholesalePrice ?? buyingPrice;
-    final retail = retailPrice ??
-        (unitsPerPackage > 0 ? wholesale / unitsPerPackage : wholesale);
+    final retail = retailPrice ?? wholesale;
     final sell = sellingPrice ?? retail;
     final p = Product(
-      id: 'P${randInt(100, 999)}',
+      id: genProductId(),
       name: name,
       sku: finalSku,
       category: category,
@@ -701,8 +802,6 @@ class AppState extends ChangeNotifier {
       wholesalePrice: wholesale,
       retailPrice: retail,
       unitLabel: unitLabel,
-      packageLabel: packageLabel,
-      unitsPerPackage: unitsPerPackage,
       currentStock: currentStock,
       minStockLevel: minStockLevel,
       saleType: saleType,
@@ -711,6 +810,7 @@ class AppState extends ChangeNotifier {
     );
     products.add(p);
     _persistProducts();
+    markProductDirty(p.id);
     _log(
         'PRODUCT_CREATE',
         '${session.role.label} ${session.name} registered "${p.name}" (${p.sku}): '
@@ -752,6 +852,7 @@ class AppState extends ChangeNotifier {
     final diff = updated.currentStock - original.currentStock;
     products[idx] = updated;
     _persistProducts();
+    markProductDirty(updated.id);
     if (diff != 0) {
       _addTransaction(
         productId: updated.id,
@@ -823,6 +924,7 @@ class AppState extends ChangeNotifier {
     final p = products[idx];
     p.isFavorite = !p.isFavorite;
     _persistProducts();
+    markProductDirty(p.id);
     _log(
         'PRODUCT_UPDATE',
         '${session.name} ${p.isFavorite ? 'starred' : 'unstarred'} '
@@ -854,7 +956,7 @@ class AppState extends ChangeNotifier {
       final newSku = '$cleanSku-B${otherBatches + 1}';
       final newName = '${p.name} (Batch ${otherBatches + 1})';
       final np = Product(
-        id: 'P${randInt(100, 999)}${randInt(10, 99)}',
+        id: genProductId(),
         name: newName,
         sku: newSku,
         category: p.category,
@@ -863,8 +965,6 @@ class AppState extends ChangeNotifier {
         wholesalePrice: p.wholesalePrice,
         retailPrice: p.retailPrice,
         unitLabel: p.unitLabel,
-        packageLabel: p.packageLabel,
-        unitsPerPackage: p.unitsPerPackage,
         currentStock: qty,
         minStockLevel: p.minStockLevel,
         saleType: p.saleType,
@@ -884,6 +984,7 @@ class AppState extends ChangeNotifier {
         reason: 'restock',
         notes: 'Batch restock with different expiry $newExpirationDate',
       );
+      markProductDirty(np.id);
       if (!offlineMode) {
         triggerSync().catchError((_) => SyncResult(false, 0));
       }
@@ -923,6 +1024,7 @@ class AppState extends ChangeNotifier {
       reason: 'restock',
       notes: 'Manual stock-in replenishment',
     );
+    markProductDirty(p.id);
     if (!offlineMode) {
       triggerSync().catchError((_) => SyncResult(false, 0));
     }
@@ -991,6 +1093,7 @@ class AppState extends ChangeNotifier {
       changeDue: changeDue,
       loanAmount: loanAmount,
       customerName: customerName,
+      customerContact: loanAmount > 0 ? customerContact : null,
       loanPledgeDate: resolvedPledgeDate,
       timestamp: now.toUtc().toIso8601String(),
       cashierId: session.userId,
@@ -1072,6 +1175,7 @@ class AppState extends ChangeNotifier {
     );
     loans.insert(0, loan);
     _persistLoans();
+    markLoanDirty(loan.id);
     _log('LOAN_CREATE',
         'Registered loan of shs ${_fmt(amount)} for $customerName (due $pledgeDate)');
     if (!offlineMode) {
@@ -1102,6 +1206,7 @@ class AppState extends ChangeNotifier {
       loan.settledAt = DateTime.now().toUtc().toIso8601String();
     }
     _persistLoans();
+    markLoanDirty(loan.id);
     _log('LOAN_PAYMENT',
         'Received shs ${_fmt(applied)} on loan ${loan.id} (${loan.customerName}). Balance: shs ${_fmt(loan.balance)}');
     if (justSettled) {
@@ -1131,6 +1236,7 @@ class AppState extends ChangeNotifier {
     // settlement stamp so the stored status reflects reality.
     if (!loan.isSettled) loan.settledAt = null;
     _persistLoans();
+    markLoanDirty(loan.id);
     _log('LOAN_INCREASE',
         'Added shs ${_fmt(amount)} more credit to loan ${loan.id} (${loan.customerName}). New balance: shs ${_fmt(loan.balance)}');
     if (!offlineMode) {
@@ -1378,6 +1484,8 @@ class AppState extends ChangeNotifier {
     List<String> products = const [],
     List<String> loans = const [],
     List<String> expenses = const [],
+    List<String> categories = const [],
+    List<String> expenseCategories = const [],
   }) {
     var changed = false;
     if (sales.isNotEmpty) {
@@ -1413,6 +1521,25 @@ class AppState extends ChangeNotifier {
       this.expenses.removeWhere((e) => ids.contains(e.id));
       if (this.expenses.length != before) {
         _persistExpenses();
+        changed = true;
+      }
+    }
+    // Categories are bare strings, so they are dropped by value.
+    if (categories.isNotEmpty) {
+      final gone = categories.toSet();
+      final before = this.categories.length;
+      this.categories.removeWhere(gone.contains);
+      if (this.categories.length != before) {
+        _persistCategories();
+        changed = true;
+      }
+    }
+    if (expenseCategories.isNotEmpty) {
+      final gone = expenseCategories.toSet();
+      final before = this.expenseCategories.length;
+      this.expenseCategories.removeWhere(gone.contains);
+      if (this.expenseCategories.length != before) {
+        _persistExpenseCategories();
         changed = true;
       }
     }

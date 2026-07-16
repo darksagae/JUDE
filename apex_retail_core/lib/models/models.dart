@@ -51,9 +51,7 @@ class Product {
   num wholesalePrice; // Minimum allowed selling price (floor). Not a customer-facing price tier.
   num retailPrice; // Default selling price per unit, shown at POS checkout.
   String unitLabel; // Unit name, e.g. 'piece', 'kg', 'litre'.
-  String? packageLabel; // Deprecated: bulk-package feature removed. Kept for old synced records.
-  num unitsPerPackage; // Deprecated: bulk-package feature removed. Always 1 for new records.
-  num currentStock; // Always in base units (unitLabel), regardless of packaging.
+  num currentStock; // Always in base units (unitLabel).
   num minStockLevel; // Threshold for low stock alert
   String saleType; // 'retail' | 'wholesale'
   String? expirationDate; // YYYY-MM-DD
@@ -63,10 +61,6 @@ class Product {
   /// Never null at runtime — defaults false for legacy / hot-reload rows.
   bool get isFavorite => _isFavorite ?? false;
   set isFavorite(bool value) => _isFavorite = value;
-
-  /// True when this product is bought/stocked in a bulk package distinct
-  /// from the retail base unit (e.g. a box of pieces, a sack of kg).
-  bool get isPackaged => (packageLabel?.isNotEmpty ?? false) && unitsPerPackage > 1;
 
   Product({
     required this.id,
@@ -78,8 +72,6 @@ class Product {
     this.wholesalePrice = 0,
     num? retailPrice,
     this.unitLabel = 'piece',
-    this.packageLabel,
-    this.unitsPerPackage = 1,
     required this.currentStock,
     required this.minStockLevel,
     this.saleType = 'retail',
@@ -97,7 +89,6 @@ class Product {
     final wholesale = j['wholesalePrice'] as num? ??
         j['minSellingPrice'] as num? ??
         (j['buyingPrice'] as num? ?? 0);
-    final unitsPerPackage = j['unitsPerPackage'] as num? ?? 1;
     return Product(
       id: j['id'] as String,
       name: j['name'] as String,
@@ -106,11 +97,8 @@ class Product {
       buyingPrice: j['buyingPrice'] as num? ?? 0,
       sellingPrice: j['sellingPrice'] as num? ?? 0,
       wholesalePrice: wholesale,
-      retailPrice: j['retailPrice'] as num? ??
-          (unitsPerPackage > 0 ? wholesale / unitsPerPackage : wholesale),
+      retailPrice: j['retailPrice'] as num? ?? wholesale,
       unitLabel: j['unitLabel'] as String? ?? 'piece',
-      packageLabel: j['packageLabel'] as String?,
-      unitsPerPackage: unitsPerPackage,
       currentStock: j['currentStock'] as num? ?? 0,
       minStockLevel: j['minStockLevel'] as num? ?? 0,
       saleType: j['saleType'] as String? ?? 'retail',
@@ -130,8 +118,6 @@ class Product {
         'wholesalePrice': wholesalePrice,
         'retailPrice': retailPrice,
         'unitLabel': unitLabel,
-        'packageLabel': packageLabel,
-        'unitsPerPackage': unitsPerPackage,
         'currentStock': currentStock,
         'minStockLevel': minStockLevel,
         'saleType': saleType,
@@ -153,7 +139,6 @@ class SaleItem {
   num totalBuyingPrice;
   num totalSellingPrice;
   num profit;
-  String pricingTier; // 'retail' | 'wholesale' — which price the line was sold at
 
   SaleItem({
     required this.id,
@@ -165,10 +150,7 @@ class SaleItem {
     required this.totalBuyingPrice,
     required this.totalSellingPrice,
     required this.profit,
-    this.pricingTier = 'retail',
   });
-
-  bool get isWholesale => pricingTier == 'wholesale';
 
   factory SaleItem.fromJson(Map<String, dynamic> j) => SaleItem(
         id: j['id'] as String? ?? '',
@@ -180,7 +162,6 @@ class SaleItem {
         totalBuyingPrice: j['totalBuyingPrice'] as num? ?? 0,
         totalSellingPrice: j['totalSellingPrice'] as num? ?? 0,
         profit: j['profit'] as num? ?? 0,
-        pricingTier: j['pricingTier'] as String? ?? 'retail',
       );
 
   Map<String, dynamic> toJson() => {
@@ -193,7 +174,6 @@ class SaleItem {
         'totalBuyingPrice': totalBuyingPrice,
         'totalSellingPrice': totalSellingPrice,
         'profit': profit,
-        'pricingTier': pricingTier,
       };
 }
 
@@ -208,6 +188,7 @@ class Sale {
   num changeDue;
   num loanAmount; // portion left unpaid as a loan (0 == fully paid)
   String? customerName; // required when there is a loan portion
+  String? customerContact; // required when there is a loan portion
   String? loanPledgeDate; // YYYY-MM-DD, set only when loanAmount > 0
   String timestamp;
   String cashierId;
@@ -226,6 +207,7 @@ class Sale {
     required this.changeDue,
     this.loanAmount = 0,
     this.customerName,
+    this.customerContact,
     this.loanPledgeDate,
     required this.timestamp,
     required this.cashierId,
@@ -249,6 +231,7 @@ class Sale {
         changeDue: j['changeDue'] as num? ?? 0,
         loanAmount: j['loanAmount'] as num? ?? 0,
         customerName: j['customerName'] as String?,
+        customerContact: j['customerContact'] as String?,
         loanPledgeDate: j['loanPledgeDate'] as String?,
         timestamp: j['timestamp'] as String? ?? '',
         cashierId: j['cashierId'] as String? ?? '',
@@ -268,6 +251,7 @@ class Sale {
         'changeDue': changeDue,
         'loanAmount': loanAmount,
         if (customerName != null) 'customerName': customerName,
+        if (customerContact != null) 'customerContact': customerContact,
         if (loanPledgeDate != null) 'loanPledgeDate': loanPledgeDate,
         'timestamp': timestamp,
         'cashierId': cashierId,

@@ -3,6 +3,20 @@ import { Product, Sale, StockTransaction, AuditLog, UserSession, EndOfDayReport,
 // Helper to generate IDs
 export const generateId = () => Math.random().toString(36).substring(2, 11).toUpperCase();
 
+// Mints a product id. `id` is the sync primary key both clients upsert into, so
+// the Flutter app must mint these identically — see `genProductId` in
+// apex_retail_core/lib/data/id.dart. The old `P###` form had only 900 values, so
+// two terminals adding products on the same day could collide and silently
+// overwrite each other. Time prefix keeps ids roughly ordered; the random suffix
+// separates products created within the same millisecond. Legacy `P###` ids stay
+// valid — nothing parses this format, it only has to be unique.
+export const generateProductId = () => {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let suffix = '';
+  for (let i = 0; i < 4; i++) suffix += chars[Math.floor(Math.random() * chars.length)];
+  return 'P' + Date.now().toString(36).toUpperCase() + suffix;
+};
+
 // No demo catalog — the system starts empty and is populated only with real
 // data, which syncs to the Neon cloud database via /api/sync.
 const DEFAULT_PRODUCTS: Product[] = [];
@@ -25,15 +39,73 @@ const KEYS = {
   SESSION: 'sm_session',
   OFFLINE_MODE: 'sm_offline_mode',
   PENDING_SYNC: 'sm_pending_sync',
-  MANAGER_PASSWORD: 'sm_manager_password',
   STAFF_PROFILES: 'sm_staff_profiles',
-  EXPIRED_CONTROL: 'sm_expired_control',
   CATEGORIES: 'sm_categories',
+  EXPENSE_CATEGORIES: 'sm_expense_categories',
+  DIRTY_PRODUCTS: 'sm_dirty_products',
+  DIRTY_LOANS: 'sm_dirty_loans',
   PRINTER_SETTINGS: 'sm_printer_settings'
 };
 
 // Memory cache for sub-millisecond retrieval and absolute zero freezing
 const cache: Record<string, any> = {};
+
+// Counts local writes made by this device. triggerSync snapshots it before
+// building its payload; if it has moved by the time the response lands, the user
+// saved something (an expense, a restock, a loan payment) while that request was
+// in flight. The response was computed WITHOUT that record, so adopting it would
+// silently erase the write — which is why a new expense appeared and then
+// vanished a few seconds later, and why a restock could revert. In that case we
+// skip adoption and let the write's own sync reconcile instead.
+let localWriteSeq = 0;
+const markLocalWrite = () => { localWriteSeq++; };
+
+// Ids of products this device has actually edited since its last successful sync.
+// Sync pushes the whole catalog, but only these are offered as authoritative —
+// otherwise this device's stale copy of an untouched product would overwrite a
+// restock someone made on another terminal.
+const readDirtyProducts = (): string[] => {
+  try { return JSON.parse(localStorage.getItem(KEYS.DIRTY_PRODUCTS) || '[]'); } catch { return []; }
+};
+const markProductDirty = (id: string) => {
+  if (!id) return;
+  const ids = readDirtyProducts();
+  if (!ids.includes(id)) {
+    ids.push(id);
+    localStorage.setItem(KEYS.DIRTY_PRODUCTS, JSON.stringify(ids));
+  }
+};
+const clearDirtyProducts = (synced: string[]) => {
+  if (synced.length === 0) return;
+  const done = new Set(synced);
+  localStorage.setItem(
+    KEYS.DIRTY_PRODUCTS,
+    JSON.stringify(readDirtyProducts().filter(id => !done.has(id)))
+  );
+};
+
+// Same story for loans: the server upserts every loan a device pushes, so an
+// idle terminal holding a pre-payment copy would overwrite the repayment someone
+// just recorded elsewhere. Only loans changed here are offered as authoritative.
+const readDirtyLoans = (): string[] => {
+  try { return JSON.parse(localStorage.getItem(KEYS.DIRTY_LOANS) || '[]'); } catch { return []; }
+};
+const markLoanDirty = (id: string) => {
+  if (!id) return;
+  const ids = readDirtyLoans();
+  if (!ids.includes(id)) {
+    ids.push(id);
+    localStorage.setItem(KEYS.DIRTY_LOANS, JSON.stringify(ids));
+  }
+};
+const clearDirtyLoans = (synced: string[]) => {
+  if (synced.length === 0) return;
+  const done = new Set(synced);
+  localStorage.setItem(
+    KEYS.DIRTY_LOANS,
+    JSON.stringify(readDirtyLoans().filter(id => !done.has(id)))
+  );
+};
 
 export const localDB = {
   // Initialize with seed data if empty
@@ -65,9 +137,6 @@ export const localDB = {
     if (localStorage.getItem(KEYS.OFFLINE_MODE) === null) {
       localStorage.setItem(KEYS.OFFLINE_MODE, 'false');
     }
-    if (!localStorage.getItem(KEYS.MANAGER_PASSWORD)) {
-      localStorage.setItem(KEYS.MANAGER_PASSWORD, '2468');
-    }
     if (!localStorage.getItem(KEYS.STAFF_PROFILES)) {
       // Single bootstrap owner only — matches the owner seeded in Neon. The real
       // staff list is pulled from the cloud database on first sync.
@@ -75,9 +144,6 @@ export const localDB = {
         { userId: 'TM001', name: 'Jude', role: 'top_manager', passcode: '2468' }
       ];
       localStorage.setItem(KEYS.STAFF_PROFILES, JSON.stringify(defaultStaff));
-    }
-    if (!localStorage.getItem(KEYS.EXPIRED_CONTROL)) {
-      localStorage.setItem(KEYS.EXPIRED_CONTROL, 'restrict');
     }
     if (!localStorage.getItem(KEYS.CATEGORIES)) {
       const initialCats = [
@@ -93,6 +159,22 @@ export const localDB = {
         'Seedlings and Cuttings',
       ];
       localStorage.setItem(KEYS.CATEGORIES, JSON.stringify(initialCats));
+    }
+    if (!localStorage.getItem(KEYS.EXPENSE_CATEGORIES)) {
+      // Mirrors initialExpenseCategories in the Flutter app so both clients start
+      // from the same list and the cloud union stays clean.
+      const initialExpenseCats = [
+        'Restock / Purchases',
+        'Rent',
+        'Utilities (Power/Water)',
+        'Salaries / Wages',
+        'Transport',
+        'Maintenance',
+        'Licenses / Taxes',
+        'Marketing',
+        'Miscellaneous',
+      ];
+      localStorage.setItem(KEYS.EXPENSE_CATEGORIES, JSON.stringify(initialExpenseCats));
     }
     if (!localStorage.getItem(KEYS.PRINTER_SETTINGS)) {
       const defaultPrinter: PrinterSettings = {
@@ -137,11 +219,10 @@ export const localDB = {
     if (!cache[KEYS.REPORTS]) cache[KEYS.REPORTS] = JSON.parse(localStorage.getItem(KEYS.REPORTS) || '[]');
     if (!cache[KEYS.LOANS]) cache[KEYS.LOANS] = JSON.parse(localStorage.getItem(KEYS.LOANS) || '[]');
     if (!cache[KEYS.EXPENSES]) cache[KEYS.EXPENSES] = JSON.parse(localStorage.getItem(KEYS.EXPENSES) || '[]');
+    if (!cache[KEYS.EXPENSE_CATEGORIES]) cache[KEYS.EXPENSE_CATEGORIES] = JSON.parse(localStorage.getItem(KEYS.EXPENSE_CATEGORIES) || '[]');
     if (!cache[KEYS.SESSION]) cache[KEYS.SESSION] = JSON.parse(localStorage.getItem(KEYS.SESSION) || 'null');
     if (!cache[KEYS.STAFF_PROFILES]) cache[KEYS.STAFF_PROFILES] = JSON.parse(localStorage.getItem(KEYS.STAFF_PROFILES) || '[]');
     if (cache[KEYS.OFFLINE_MODE] === undefined) cache[KEYS.OFFLINE_MODE] = localStorage.getItem(KEYS.OFFLINE_MODE) === 'true';
-    if (!cache[KEYS.MANAGER_PASSWORD]) cache[KEYS.MANAGER_PASSWORD] = localStorage.getItem(KEYS.MANAGER_PASSWORD) || '2468';
-    if (!cache[KEYS.EXPIRED_CONTROL]) cache[KEYS.EXPIRED_CONTROL] = localStorage.getItem(KEYS.EXPIRED_CONTROL) || 'restrict';
     if (!cache[KEYS.CATEGORIES]) cache[KEYS.CATEGORIES] = JSON.parse(localStorage.getItem(KEYS.CATEGORIES) || '[]');
     if (!cache[KEYS.PRINTER_SETTINGS]) cache[KEYS.PRINTER_SETTINGS] = JSON.parse(localStorage.getItem(KEYS.PRINTER_SETTINGS) || 'null');
   },
@@ -200,7 +281,39 @@ export const localDB = {
     localStorage.setItem(KEYS.CATEGORIES, JSON.stringify(categories));
   },
 
+  getExpenseCategories: (): string[] => {
+    localDB.init();
+    return cache[KEYS.EXPENSE_CATEGORIES];
+  },
+
+  setExpenseCategories: (categories: string[]) => {
+    cache[KEYS.EXPENSE_CATEGORIES] = categories;
+    localStorage.setItem(KEYS.EXPENSE_CATEGORIES, JSON.stringify(categories));
+  },
+
+  // Categories are a shared list, so an add/delete goes straight to its own
+  // authoritative endpoint. Riding along on the next bulk sync is not enough:
+  // a delete would be undone by the next device to push its stale list, and a
+  // re-added name would stay blocked by its tombstone.
+  pushCategoryChange: async (action: 'add' | 'delete', kind: 'product' | 'expense', name: string) => {
+    if (localDB.isOfflineMode()) return;
+    const session = localDB.getSession();
+    try {
+      const res = await fetch(`/api/categories/${action}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, kind, role: session.role })
+      });
+      const data = await res.json().catch(() => null);
+      if (res.ok && data?.success) {
+        if (data.categories) localDB.setCategories(data.categories);
+        if (data.expenseCategories) localDB.setExpenseCategories(data.expenseCategories);
+      }
+    } catch { /* offline — the local change stands and unions in on the next sync */ }
+  },
+
   addCategory: (category: string): boolean => {
+    markLocalWrite();
     const categories = localDB.getCategories();
     const normalized = category.trim();
     if (normalized && !categories.includes(normalized)) {
@@ -208,12 +321,42 @@ export const localDB = {
       localDB.setCategories(categories);
       const session = localDB.getSession();
       localDB.logAction(session.userId, session.name, session.role, 'CATEGORY_CREATE', `Created category: ${normalized}`);
+      localDB.pushCategoryChange('add', 'product', normalized);
       return true;
     }
     return false;
   },
 
+  addExpenseCategory: (category: string): boolean => {
+    markLocalWrite();
+    const categories = localDB.getExpenseCategories();
+    const normalized = category.trim();
+    if (normalized && !categories.includes(normalized)) {
+      categories.push(normalized);
+      localDB.setExpenseCategories(categories);
+      const session = localDB.getSession();
+      localDB.logAction(session.userId, session.name, session.role, 'EXPENSE_CATEGORY_CREATE', `Created expenditure category: ${normalized}`);
+      localDB.pushCategoryChange('add', 'expense', normalized);
+      return true;
+    }
+    return false;
+  },
+
+  deleteExpenseCategory: (category: string): boolean => {
+    markLocalWrite();
+    const categories = localDB.getExpenseCategories();
+    const index = categories.indexOf(category);
+    if (index === -1 || categories.length <= 1) return false;
+    categories.splice(index, 1);
+    localDB.setExpenseCategories(categories);
+    const session = localDB.getSession();
+    localDB.logAction(session.userId, session.name, session.role, 'EXPENSE_CATEGORY_DELETE', `Deleted expenditure category: ${category}`);
+    localDB.pushCategoryChange('delete', 'expense', category);
+    return true;
+  },
+
   editCategory: (oldName: string, newName: string): boolean => {
+    markLocalWrite();
     const categories = localDB.getCategories();
     const oldIndex = categories.indexOf(oldName);
     const normalizedNew = newName.trim();
@@ -232,8 +375,13 @@ export const localDB = {
       });
       if (updatedCount > 0) {
         localDB.setProducts(products);
+        products.forEach(p => { if (p.category === normalizedNew) markProductDirty(p.id); });
       }
-      
+
+      // A rename is an add of the new name plus a delete of the old one.
+      localDB.pushCategoryChange('add', 'product', normalizedNew);
+      localDB.pushCategoryChange('delete', 'product', oldName);
+
       const session = localDB.getSession();
       localDB.logAction(session.userId, session.name, session.role, 'CATEGORY_UPDATE', `Edited category ${oldName} -> ${normalizedNew}. Re-assigned ${updatedCount} products.`);
       return true;
@@ -242,6 +390,7 @@ export const localDB = {
   },
 
   deleteCategory: (category: string, fallbackCategory: string = 'General'): boolean => {
+    markLocalWrite();
     const categories = localDB.getCategories();
     const index = categories.indexOf(category);
     if (index !== -1) {
@@ -266,6 +415,7 @@ export const localDB = {
         localDB.setProducts(products);
       }
       
+      localDB.pushCategoryChange('delete', 'product', category);
       const session = localDB.getSession();
       localDB.logAction(session.userId, session.name, session.role, 'CATEGORY_DELETE', `Deleted category ${category}. Re-assigned ${updatedCount} products to ${fallbackCategory}.`);
       return true;
@@ -283,15 +433,6 @@ export const localDB = {
     return cache[KEYS.OFFLINE_MODE];
   },
 
-  getManagerPassword: (): string => {
-    localDB.init();
-    return cache[KEYS.MANAGER_PASSWORD];
-  },
-
-  setManagerPassword: (password: string) => {
-    cache[KEYS.MANAGER_PASSWORD] = password;
-    localStorage.setItem(KEYS.MANAGER_PASSWORD, password);
-  },
 
   getStaffProfiles: (): any[] => {
     localDB.init();
@@ -307,6 +448,7 @@ export const localDB = {
   },
 
   setStaffProfiles: (profiles: any[]) => {
+    markLocalWrite();
     const before: any[] = cache[KEYS.STAFF_PROFILES] || [];
     cache[KEYS.STAFF_PROFILES] = profiles;
     localStorage.setItem(KEYS.STAFF_PROFILES, JSON.stringify(profiles));
@@ -334,15 +476,6 @@ export const localDB = {
     }
   },
 
-  getExpiredSalesControl: (): 'restrict' | 'allow' => {
-    localDB.init();
-    return cache[KEYS.EXPIRED_CONTROL];
-  },
-
-  setExpiredSalesControl: (control: 'restrict' | 'allow') => {
-    cache[KEYS.EXPIRED_CONTROL] = control;
-    localStorage.setItem(KEYS.EXPIRED_CONTROL, control);
-  },
 
   // Setters
   setProducts: (products: Product[]) => {
@@ -388,6 +521,7 @@ export const localDB = {
     notes?: string;
     profitRate?: number;
   }): Loan => {
+    markLocalWrite();
     const loans = localDB.getLoans();
     const session = localDB.getSession();
     const loan: Loan = {
@@ -407,6 +541,7 @@ export const localDB = {
     };
     loans.unshift(loan);
     localDB.setLoans(loans);
+    markLoanDirty(loan.id);
     localDB.logAction(session.userId, session.name, session.role, 'LOAN_CREATE',
       `Registered loan of shs ${data.amount.toLocaleString()} for ${data.customerName} (due ${data.pledgeDate})`);
     if (!localDB.isOfflineMode()) {
@@ -416,6 +551,7 @@ export const localDB = {
   },
 
   recordLoanPayment: (loanId: string, amount: number) => {
+    markLocalWrite();
     const loans = localDB.getLoans();
     const loan = loans.find(l => l.id === loanId);
     if (!loan || amount <= 0) return;
@@ -433,6 +569,7 @@ export const localDB = {
     const justSettled = loanSettled(loan) && !loan.settledAt;
     if (justSettled) loan.settledAt = new Date().toISOString();
     localDB.setLoans(loans);
+    markLoanDirty(loan.id);
     localDB.logAction(session.userId, session.name, session.role, 'LOAN_PAYMENT',
       `Received shs ${applied.toLocaleString()} on loan ${loan.id} (${loan.customerName}). Balance: shs ${loanBalance(loan).toLocaleString()}`);
     if (justSettled) {
@@ -445,6 +582,7 @@ export const localDB = {
   },
 
   deleteLoan: async (loanId: string) => {
+    markLocalWrite();
     const loans = localDB.getLoans().filter(l => l.id !== loanId);
     localDB.setLoans(loans);
     const session = localDB.getSession();
@@ -472,6 +610,7 @@ export const localDB = {
   },
 
   addExpense: (data: { category: string; description: string; amount: number }): Expense => {
+    markLocalWrite();
     const expenses = localDB.getExpenses();
     const session = localDB.getSession();
     const expense: Expense = {
@@ -494,6 +633,7 @@ export const localDB = {
   },
 
   deleteExpense: async (id: string) => {
+    markLocalWrite();
     const expenses = localDB.getExpenses().filter(e => e.id !== id);
     localDB.setExpenses(expenses);
     const session = localDB.getSession();
@@ -512,6 +652,7 @@ export const localDB = {
   // Authoritative product delete (Top Manager). Bulk sync only upserts products,
   // so a deletion must go through this route or it reappears on the next pull.
   deleteProduct: async (productId: string) => {
+    markLocalWrite();
     const products = localDB.getProducts().filter(p => p.id !== productId);
     localDB.setProducts(products);
     const session = localDB.getSession();
@@ -542,6 +683,7 @@ export const localDB = {
 
   // Core Actions
   addProduct: (product: Omit<Product, 'id' | 'createdAt'>): Product => {
+    markLocalWrite();
     const products = localDB.getProducts();
     let sku = product.sku ? product.sku.trim() : '';
     if (!sku) {
@@ -557,11 +699,12 @@ export const localDB = {
     const newProduct: Product = {
       ...product,
       sku,
-      id: 'P' + Math.floor(100 + Math.random() * 900).toString(),
+      id: generateProductId(),
       createdAt: new Date().toISOString()
     };
     products.push(newProduct);
     localDB.setProducts(products);
+    markProductDirty(newProduct.id);
 
     // Audit and Stock Transaction
     const session = localDB.getSession();
@@ -577,10 +720,17 @@ export const localDB = {
       notes: 'Initial stock setup'
     });
 
+    // Push straight away so other terminals see the new commodity without waiting
+    // for the next background poll.
+    if (!localDB.isOfflineMode()) {
+      localDB.triggerSync().catch(() => {});
+    }
+
     return newProduct;
   },
 
   updateProduct: (updated: Product) => {
+    markLocalWrite();
     const products = localDB.getProducts();
     const index = products.findIndex(p => p.id === updated.id);
     if (index !== -1) {
@@ -599,6 +749,7 @@ export const localDB = {
       const original = products[index];
       products[index] = updatedWithSku;
       localDB.setProducts(products);
+      markProductDirty(updatedWithSku.id);
 
       const session = localDB.getSession();
       
@@ -617,10 +768,15 @@ export const localDB = {
       }
 
       localDB.logAction(session.userId, session.name, session.role, 'PRODUCT_UPDATE', `Updated product details for SKU ${updatedWithSku.sku}`);
+
+      if (!localDB.isOfflineMode()) {
+        localDB.triggerSync().catch(() => {});
+      }
     }
   },
 
   restockProduct: (productId: string, qty: number, buyingPrice?: number, newExpirationDate?: string | null, createNewBatch?: boolean) => {
+    markLocalWrite();
     const products = localDB.getProducts();
     const p = products.find(prod => prod.id === productId);
     if (p) {
@@ -635,7 +791,7 @@ export const localDB = {
         const newName = `${p.name} (Batch ${otherBatchesCount + 1})`;
         
         const newProduct: Product = {
-          id: 'P' + Math.floor(100 + Math.random() * 900).toString() + Math.floor(10 + Math.random() * 90).toString(),
+          id: generateProductId(),
           name: newName,
           sku: newSku,
           category: p.category,
@@ -648,6 +804,7 @@ export const localDB = {
         };
         products.push(newProduct);
         localDB.setProducts(products);
+        markProductDirty(newProduct.id);
 
         localDB.logAction(session.userId, session.name, session.role, 'PRODUCT_CREATE', `Created separate batch for: ${newProduct.name} with different expiry: ${newExpirationDate}`);
         
@@ -660,6 +817,10 @@ export const localDB = {
           reason: 'restock',
           notes: `Batch restock with different expiry ${newExpirationDate}`
         });
+
+        if (!localDB.isOfflineMode()) {
+          localDB.triggerSync().catch(() => {});
+        }
         return { type: 'new_batch', product: newProduct };
       }
 
@@ -673,6 +834,7 @@ export const localDB = {
         p.expirationDate = newExpirationDate;
       }
       localDB.setProducts(products);
+      markProductDirty(p.id);
 
       localDB.logAction(session.userId, session.name, session.role, 'STOCK_IN', `Restocked ${qty} units of ${p.name}. Stock updated: ${originalStock} -> ${p.currentStock}`);
       
@@ -685,12 +847,17 @@ export const localDB = {
         reason: 'restock',
         notes: `Manual stock-in replenishment`
       });
+
+      if (!localDB.isOfflineMode()) {
+        localDB.triggerSync().catch(() => {});
+      }
       return { type: 'merged', product: p };
     }
     return null;
   },
 
   addSale: (saleData: Omit<Sale, 'id' | 'timestamp' | 'synced'>): Sale => {
+    markLocalWrite();
     const sales = localDB.getSales();
     const products = localDB.getProducts();
     const session = localDB.getSession();
@@ -736,6 +903,7 @@ export const localDB = {
   },
 
   addTransaction: (tx: Omit<StockTransaction, 'id' | 'timestamp' | 'operatorId' | 'operatorName'>) => {
+    markLocalWrite();
     const txs = localDB.getTransactions();
     const session = localDB.getSession();
     const newTx: StockTransaction = {
@@ -784,9 +952,19 @@ export const localDB = {
 
     const unsyncedSales = sales.filter(s => !s.synced);
 
+    // Snapshot taken before the payload is built — see markLocalWrite above.
+    const seqAtStart = localWriteSeq;
+
+    const dirtyAtStart = readDirtyProducts();
+    const dirtyLoansAtStart = readDirtyLoans();
+
     const payload = {
       sales: unsyncedSales,
       products,
+      dirtyProductIds: dirtyAtStart,
+      dirtyLoanIds: dirtyLoansAtStart,
+      categories: localDB.getCategories(),
+      expenseCategories: localDB.getExpenseCategories(),
       stockTransactions: transactions,
       auditLogs,
       reports,
@@ -813,6 +991,13 @@ export const localDB = {
       const data = await response.json();
 
       if (data.success) {
+        // A local write landed while this request was in flight. The server built
+        // this response without it, so adopting the lists below would erase it.
+        // Bail out — the write fired its own sync, which will reconcile cleanly.
+        if (localWriteSeq !== seqAtStart) {
+          return { success: true, syncedCount: 0 };
+        }
+
         // Double-sided sync: overwrite local storage with master server lists
         if (data.sales) {
           // Keep synced status marked as true for all of them
@@ -840,6 +1025,13 @@ export const localDB = {
         if (data.staff) {
           localDB.setStaffProfilesLocal(data.staff);
         }
+        // Category lists are the cloud's union of every device's names.
+        if (Array.isArray(data.categories) && data.categories.length > 0) {
+          localDB.setCategories(data.categories);
+        }
+        if (Array.isArray(data.expenseCategories) && data.expenseCategories.length > 0) {
+          localDB.setExpenseCategories(data.expenseCategories);
+        }
         // Drop records deleted on other devices (tombstones). Must run after the
         // list overwrites above so nothing a stale merge kept survives.
         if (data.deletions) {
@@ -854,7 +1046,21 @@ export const localDB = {
           drop(d.sales, localDB.getSales, localDB.setSales);
           drop(d.loans, localDB.getLoans, localDB.setLoans);
           drop(d.expenses, localDB.getExpenses, localDB.setExpenses);
+          // Categories are bare strings, so they are filtered by value.
+          const dropNames = (ids: string[] | undefined, getter: () => string[], setter: (v: string[]) => void) => {
+            if (!ids || ids.length === 0) return;
+            const gone = new Set(ids);
+            setter(getter().filter(n => !gone.has(n)));
+          };
+          dropNames(d.categories, localDB.getCategories, localDB.setCategories);
+          dropNames(d.expenseCategories, localDB.getExpenseCategories, localDB.setExpenseCategories);
         }
+
+        // The server has taken these edits, so this device no longer needs to
+        // claim authority over them. Anything marked dirty since this request
+        // started is deliberately left pending for the next sync.
+        clearDirtyProducts(dirtyAtStart);
+        clearDirtyLoans(dirtyLoansAtStart);
 
         if (unsyncedSales.length > 0) {
           localDB.logAction(session.userId, session.name, session.role, 'SYNC', `Successfully synchronized ${unsyncedSales.length} POS sales to cloud backup`);

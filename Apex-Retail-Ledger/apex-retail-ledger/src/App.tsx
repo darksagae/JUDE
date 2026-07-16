@@ -5,20 +5,22 @@ import POSView from './components/POSView';
 import DashboardView from './components/DashboardView';
 import InventoryView from './components/InventoryView';
 import AuditLogsView from './components/AuditLogsView';
+import LoansView from './components/LoansView';
+import ExpensesView from './components/ExpensesView';
 import StaffSettingsView from './components/StaffSettingsView';
 import { LoginPortal } from './components/LoginPortal';
 import { SalesLedgerView } from './components/SalesLedgerView';
 import { 
   LayoutDashboard, Receipt, Package, ShieldCheck, Users, 
   Wifi, WifiOff, RefreshCw, Clock, Coins, ShieldAlert, Sparkles,
-  History, LogOut, Lock, HelpCircle
+  History, LogOut, Lock, HelpCircle, HandCoins, Wallet
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
 export default function App() {
   const [currentSession, setCurrentSession] = useState<UserSession>(() => localDB.getSession());
   const [isLocked, setIsLocked] = useState(true); // Always lock terminal on boot for security credentials
-  const [activeTab, setActiveTab] = useState<'pos' | 'history' | 'dashboard' | 'inventory' | 'audit' | 'settings'>('pos');
+  const [activeTab, setActiveTab] = useState<'pos' | 'history' | 'dashboard' | 'inventory' | 'loans' | 'expenses' | 'audit' | 'settings'>('pos');
   const [isOffline, setIsOffline] = useState(() => localDB.isOfflineMode());
   const [pendingSyncCount, setPendingSyncCount] = useState(0);
   const [isSyncing, setIsSyncing] = useState(false);
@@ -66,7 +68,7 @@ export default function App() {
   const handleSessionChange = (newSession: UserSession) => {
     setCurrentSession(newSession);
     // If worker, force return to POS or History if they were on a manager-only tab
-    if (newSession.role === 'worker' && ['dashboard', 'inventory', 'audit'].includes(activeTab)) {
+    if (newSession.role === 'worker' && ['dashboard', 'inventory', 'loans', 'expenses', 'audit'].includes(activeTab)) {
       setActiveTab('pos');
     }
   };
@@ -361,6 +363,42 @@ export default function App() {
             {!isManager && <Lock size={12} className="text-slate-500" />}
           </button>
 
+          {/* Loans & credit tab */}
+          <button
+            onClick={() => setActiveTab('loans')}
+            className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-xs font-display font-semibold transition-all ${
+              activeTab === 'loans'
+                ? 'bg-indigo-600 text-white shadow-md font-bold'
+                : !isManager
+                  ? 'text-slate-500 opacity-60 hover:text-indigo-400'
+                  : 'text-slate-600 hover:text-indigo-600 hover:bg-slate-50'
+            }`}
+          >
+            <div className="flex items-center gap-3">
+              <HandCoins size={16} />
+              <span>Loans &amp; Credit</span>
+            </div>
+            {!isManager && <Lock size={12} className="text-slate-500" />}
+          </button>
+
+          {/* Expenses tab */}
+          <button
+            onClick={() => setActiveTab('expenses')}
+            className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-xs font-display font-semibold transition-all ${
+              activeTab === 'expenses'
+                ? 'bg-indigo-600 text-white shadow-md font-bold'
+                : !isManager
+                  ? 'text-slate-500 opacity-60 hover:text-indigo-400'
+                  : 'text-slate-600 hover:text-indigo-600 hover:bg-slate-50'
+            }`}
+          >
+            <div className="flex items-center gap-3">
+              <Wallet size={16} />
+              <span>Expenses</span>
+            </div>
+            {!isManager && <Lock size={12} className="text-slate-500" />}
+          </button>
+
           {/* Audit logs tab */}
           <button
             onClick={() => setActiveTab('audit')}
@@ -458,6 +496,50 @@ export default function App() {
                 <h3 className="font-display font-extrabold text-white text-base">Authorized Access Only</h3>
                 <p className="text-xs text-slate-400 leading-relaxed font-sans">
                   The commodity manager ledger and restock forms are strictly restricted to manager permissions.
+                </p>
+                <button
+                  onClick={() => setActiveTab('settings')}
+                  className="bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl px-5 py-2 text-xs font-display font-bold uppercase transition-all shadow-md shadow-emerald-950/30"
+                >
+                  Switch Shift
+                </button>
+              </div>
+            )
+          )}
+
+          {activeTab === 'loans' && (
+            isManager ? (
+              <LoansView onRefresh={handleManagerTabRefresh} />
+            ) : (
+              <div className="h-full max-w-md mx-auto flex flex-col items-center justify-center text-center py-24 space-y-4">
+                <div className="p-4 bg-slate-900 border border-slate-800 text-indigo-400 rounded-full">
+                  <ShieldAlert size={32} />
+                </div>
+                <h3 className="font-display font-extrabold text-white text-base">Authorized Access Only</h3>
+                <p className="text-xs text-slate-400 leading-relaxed font-sans">
+                  The customer credit ledger and repayment controls are restricted to supervisor permissions. Loans are created at checkout.
+                </p>
+                <button
+                  onClick={() => setActiveTab('settings')}
+                  className="bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl px-5 py-2 text-xs font-display font-bold uppercase transition-all shadow-md shadow-emerald-950/30"
+                >
+                  Switch Shift
+                </button>
+              </div>
+            )
+          )}
+
+          {activeTab === 'expenses' && (
+            isManager ? (
+              <ExpensesView onRefresh={handleManagerTabRefresh} />
+            ) : (
+              <div className="h-full max-w-md mx-auto flex flex-col items-center justify-center text-center py-24 space-y-4">
+                <div className="p-4 bg-slate-900 border border-slate-800 text-indigo-400 rounded-full">
+                  <ShieldAlert size={32} />
+                </div>
+                <h3 className="font-display font-extrabold text-white text-base">Authorized Access Only</h3>
+                <p className="text-xs text-slate-400 leading-relaxed font-sans">
+                  The operating costs ledger is restricted to manager permissions.
                 </p>
                 <button
                   onClick={() => setActiveTab('settings')}
