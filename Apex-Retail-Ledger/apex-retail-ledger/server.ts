@@ -165,9 +165,20 @@ app.post('/api/sync', async (req, res) => {
     // Ids this device actually edited since its last successful sync. Every device
     // pushes its FULL catalog, but most of those rows are just a copy of what it
     // last pulled — taking them as authoritative let an idle terminal silently
-    // revert a restock made on another machine (last writer wins). When the client
-    // sends this list we only trust the rows it really changed. Clients that don't
-    // send it (older builds) keep the previous whole-catalog behaviour.
+    // revert a restock made on another machine (last writer wins).
+    //
+    // A client that does not send this list gets NO authority over rows the cloud
+    // already knows. It used to get whole-catalog authority for backwards compat,
+    // and that was actively destroying inventory: a stale client (an old APK, or a
+    // browser tab holding a cached bundle) re-pushed its old catalog every poll and
+    // reverted every edit made anywhere else within seconds. Because it then
+    // adopted its own value back from the response, it never self-corrected — it
+    // just kept winning. carrot seeds lost 250 units this way on 2026-07-15.
+    //
+    // Failing closed is safe: such a client can still create products the cloud has
+    // never seen, its sales still merge, and its restocks still land through the
+    // stock-transaction ledger in step C (which applies quantities for exactly the
+    // products this request did not claim authority over).
     const dirtySet: Set<string> | null = Array.isArray(dirtyProductIds)
       ? new Set((dirtyProductIds as any[]).map(String))
       : null;
@@ -179,12 +190,12 @@ app.post('/api/sync', async (req, res) => {
           // that predates cloud sync still backfills.
           store.products.push(clientProd);
           authoritativeStockIds.add(clientProd.id);
-        } else if (!dirtySet || dirtySet.has(String(clientProd.id))) {
+        } else if (dirtySet && dirtySet.has(String(clientProd.id))) {
           store.products[sIdx] = { ...store.products[sIdx], ...clientProd };
           authoritativeStockIds.add(clientProd.id);
         }
-        // Otherwise: known to the cloud and untouched here — leave the cloud's
-        // copy alone and let this device adopt it from the response.
+        // Otherwise: known to the cloud and not declared as changed here — leave
+        // the cloud's copy alone and let this device adopt it from the response.
       });
     } else if (store.products.length === 0 && pushableProducts.length > 0) {
       // First device to bring a catalog online seeds the empty server catalog.
@@ -225,8 +236,10 @@ app.post('/api/sync', async (req, res) => {
     // F. Merge loans (upsert by id — balances/payments change over time).
     // Skip any loan that has been deleted so a stale device can't resurrect it.
     // Only loans this device actually changed are authoritative — same reasoning
-    // as products above. Without this an idle terminal pushing its pre-payment
-    // copy of a loan would wipe out a repayment recorded on another machine.
+    // as products above, and a client that declares nothing gets no authority over
+    // loans the cloud already knows. An idle terminal pushing its pre-payment copy
+    // of a loan would otherwise wipe out a repayment recorded on another machine —
+    // money the business is owed, silently forgiven.
     const dirtyLoanSet: Set<string> | null = Array.isArray(dirtyLoanIds)
       ? new Set((dirtyLoanIds as any[]).map(String))
       : null;
@@ -235,7 +248,7 @@ app.post('/api/sync', async (req, res) => {
       const idx = store.loans.findIndex(l => l.id === incomingLoan.id);
       if (idx === -1) {
         store.loans.push(incomingLoan);
-      } else if (!dirtyLoanSet || dirtyLoanSet.has(String(incomingLoan.id))) {
+      } else if (dirtyLoanSet && dirtyLoanSet.has(String(incomingLoan.id))) {
         store.loans[idx] = incomingLoan;
       }
     });
