@@ -1,6 +1,6 @@
 {
-  "name": "Apex Retail Ledger",
-  "description": "Professional retail and supermarket finance management ledger featuring real-time POS, thermal receipt printing, offline sync, low stock/expiration notifications, RBAC, and Gemini AI EOD balancing summaries.",
+  "name": "Jude Farm Supply — Retail Ledger",
+  "description": "Retail ledger for farm inputs and supplies: real-time POS, thermal receipt printing, offline sync, inventory with low-stock alerts, customer loans, expenses, role-based access, and end-of-day reporting.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
